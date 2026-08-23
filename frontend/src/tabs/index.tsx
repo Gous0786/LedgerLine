@@ -1,5 +1,6 @@
 import ChatPanel from '@/components/ChatPanel'
 import Placeholder from '@/components/Placeholder'
+import SourcesTab from '@/tabs/SourcesTab'
 
 export interface TabDef {
   id: string
@@ -11,16 +12,7 @@ export const TABS: TabDef[] = [
   {
     id: 'sources',
     label: 'Sources',
-    render: () => (
-      <Placeholder title="Sources">
-        <p>
-          Upload CSVs. Each file is sniffed, typed and written to its own SQLite table, so no
-          fixed reconciliation schema is imposed — sources can be joined in whatever direction
-          a given transaction flow requires.
-        </p>
-        <p>Backed by GET /api/datasets.</p>
-      </Placeholder>
-    ),
+    render: () => <SourcesTab />,
   },
   {
     id: 'console',

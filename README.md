@@ -4,8 +4,9 @@ Multi-source, multi-directional reconciliation. Sources are arbitrary CSVs with 
 fixed schema; the direction of reconciliation follows the transaction flow rather
 than a predefined model.
 
-**Status: scaffold (phase 0).** Backend, stream protocol, SQLite and frontend shell
-are up and verified end to end. No reconciliation logic or agent is wired yet.
+**Status: CSV ingest + display.** Upload multiple CSVs, each lands in its own SQLite
+table and gets its own switchable tab in the Sources view. No matching logic or agent
+is wired yet.
 
 ## Stack
 
@@ -88,10 +89,32 @@ frontend/src/
   parts; stable-id updates and transient suppression both behave as designed
 - frontend typechecks and builds clean
 
+## CSV ingestion
+
+Each file becomes its own table (`ds_<id>`); nothing is forced into a shared schema.
+Delimiter (`, ; 	 |`), encoding (UTF-8/BOM, cp1252, latin-1) and column types are
+detected per file, and what was found is recorded in `dataset_column`.
+
+Type inference is deliberately conservative, because in reconciliation a mangled
+identifier becomes a false break. A column is numeric only if *every* non-empty
+value parses **and** no identifier hazard applies:
+
+- **Leading zeros stay TEXT.** A UTR of `0007712345` parses fine as a number, and
+  coercing it destroys the padding that makes it matchable. `0.5` is still REAL.
+- **Digit runs longer than 15 stay TEXT** — an identifier, and float would cost
+  precision anyway.
+- Ragged rows are padded/truncated to the header width rather than rejected.
+- One bad file in a batch does not sink the rest; it returns in `failed`.
+
+    POST   /api/datasets/upload          multipart, repeated `files` field
+    GET    /api/datasets                 list
+    GET    /api/datasets/{id}            metadata + columns
+    GET    /api/datasets/{id}/rows       ?offset&limit (max 500)
+    DELETE /api/datasets/{id}            drops the table too
+
 ## Next
 
-1. CSV ingest → per-dataset tables, sniffing and typing; Sources tab
-2. Deterministic matching over SQL, driven by the flow model — **before** the agent,
+1. Deterministic matching over SQL, driven by the flow model — **before** the agent,
    so the numbers are reproducible without an LLM in the loop
-3. ADK tree + `translator.py`, replacing the scripted stream in `api/chat.py`
-4. Activity and Metrics surfaces off the `data-*` parts already defined
+2. ADK tree + `translator.py`, replacing the scripted stream in `api/chat.py`
+3. Activity and Metrics surfaces off the `data-*` parts already defined

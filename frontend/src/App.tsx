@@ -3,7 +3,7 @@ import { TABS } from '@/tabs'
 import { getJSON, type Health } from '@/lib/api'
 
 export default function App() {
-  const [active, setActive] = useState(TABS[1].id) // Console
+  const [active, setActive] = useState(TABS[0].id) // Sources
   const [health, setHealth] = useState<Health | null>(null)
   const [healthError, setHealthError] = useState<string | null>(null)
 
