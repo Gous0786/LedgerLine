@@ -1,0 +1,26 @@
+[project]
+name = "recon-backend"
+version = "0.1.0"
+description = "Agentic multi-source reconciliation - backend + ADK agent host"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+    "pydantic-settings>=2.15.0",
+    "python-multipart>=0.0.20",
+    "google-adk>=2.7.1",
+    "litellm>=1.98.0",
+]
+
+[dependency-groups]
+dev = ["ruff>=0.9.0"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.uv]
+package = false
