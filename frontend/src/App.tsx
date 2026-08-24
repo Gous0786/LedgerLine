@@ -1,59 +1,72 @@
-import { useEffect, useState } from 'react'
-import { TABS } from '@/tabs'
-import { getJSON, type Health } from '@/lib/api'
+import { useEffect, useRef, useState } from 'react'
+import TopBar from '@/components/TopBar'
+import StatePanel from '@/components/StatePanel'
+import MetricsPanel from '@/components/MetricsPanel'
+import ActivityStream from '@/components/ActivityStream'
+import DataView from '@/components/DataView'
+import ChatBar from '@/components/ChatBar'
+import { ChatProvider, useChatState } from '@/state/ChatContext'
+import { DatasetsProvider } from '@/state/DatasetsContext'
 
-export default function App() {
-  const [active, setActive] = useState(TABS[0].id) // Sources
-  const [health, setHealth] = useState<Health | null>(null)
-  const [healthError, setHealthError] = useState<string | null>(null)
+type Mode = 'activity' | 'data'
 
+const MODES: { id: Mode; label: string }[] = [
+  { id: 'activity', label: 'Activity' },
+  { id: 'data', label: 'Data' },
+]
+
+function Workspace() {
+  const [mode, setMode] = useState<Mode>('data')
+  const { busy } = useChatState()
+  const wasBusy = useRef(false)
+
+  // Follow the work: when the agent starts, surface what it is doing. Only on
+  // the idle→busy edge, so a manual switch back to Data isn't yanked away.
   useEffect(() => {
-    getJSON<Health>('/health')
-      .then(setHealth)
-      .catch((e: Error) => setHealthError(e.message))
-  }, [])
-
-  const tab = TABS.find((t) => t.id === active) ?? TABS[0]
+    if (busy && !wasBusy.current) setMode('activity')
+    wasBusy.current = busy
+  }, [busy])
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center gap-6 border-b border-[--color-edge] px-6 py-3">
-        <span className="font-medium tracking-tight">Reconciliation</span>
+    <section className="glass flex min-w-0 flex-col overflow-hidden rounded-lg">
+      <div className="flex shrink-0 items-center gap-1 border-b border-line px-3 py-1.5">
+        {MODES.map((m) => (
+          <button
+            key={m.id}
+            onClick={() => setMode(m.id)}
+            className={
+              'rounded px-2.5 py-1 text-[12px] transition-colors ' +
+              (mode === m.id ? 'bg-accent/15 text-ink' : 'text-faint hover:text-muted')
+            }
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
 
-        <nav className="flex gap-1">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setActive(t.id)}
-              className={
-                'rounded px-3 py-1.5 text-sm transition-colors ' +
-                (t.id === active
-                  ? 'bg-[--color-panel] text-[--color-ink]'
-                  : 'text-[--color-muted] hover:text-[--color-ink]')
-              }
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
+      <div className="min-h-0 flex-1">
+        {mode === 'activity' ? <ActivityStream /> : <DataView />}
+      </div>
+    </section>
+  )
+}
 
-        <div className="ml-auto font-mono text-xs text-[--color-muted]">
-          {healthError ? (
-            <span className="text-red-400">backend unreachable</span>
-          ) : health ? (
-            <span>
-              schema v{health.schema_version ?? '—'} ·{' '}
-              <span className={health.openrouter_key_present ? '' : 'text-amber-400'}>
-                openrouter {health.openrouter_key_present ? 'ok' : 'no key'}
-              </span>
-            </span>
-          ) : (
-            <span>connecting…</span>
-          )}
+export default function App() {
+  return (
+    <DatasetsProvider>
+      <ChatProvider>
+        <div className="flex h-full flex-col">
+          <TopBar />
+
+          <div className="grid min-h-0 flex-1 grid-cols-[15rem_minmax(0,1fr)_13rem] gap-3 p-3">
+            <StatePanel />
+            <Workspace />
+            <MetricsPanel />
+          </div>
+
+          <ChatBar />
         </div>
-      </header>
-
-      <main className="min-h-0 flex-1 overflow-hidden">{tab.render()}</main>
-    </div>
+      </ChatProvider>
+    </DatasetsProvider>
   )
 }

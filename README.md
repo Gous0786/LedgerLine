@@ -76,9 +76,38 @@ backend/app/
     root_agent.py      orchestrator placeholder
 frontend/src/
   types/stream.ts      typed mirror of protocol.py
-  components/          ChatPanel · Placeholder
-  tabs/                Sources · Console · Matches · Breaks · Activity · Metrics
+  state/               ChatContext (one shared useChat) · DatasetsContext
+  components/          TopBar · StatePanel · ActivityStream · DataView
+                       DataTable · MetricsPanel · ChatBar
 ```
+
+## Frontend shell
+
+    ┌ TopBar ── brand + one tab per uploaded CSV + upload ────────┐
+    │ State      │  Workspace  [Activity | Data]  │  Metrics      │
+    │ sources    │  agent ops, tool calls,        │  cost         │
+    │ run stage  │  returned rows / CSV table     │  tokens       │
+    │ backend    │                                │  time         │
+    ├────────────┴────────────────────────────────┴───────────────┤
+    │ ChatBar                                                     │
+    └─────────────────────────────────────────────────────────────┘
+
+The workspace defaults to Data and flips to Activity on the idle→busy edge, so
+a run surfaces itself without overriding a manual switch back.
+
+`useChat` is lifted into `ChatContext` because three surfaces read one stream --
+input at the bottom, the agent's work in the middle, the meter on the right.
+Separate hooks would open three streams.
+
+Theme: deep `#0b0f17` base, graph-paper grid, aurora mesh gradient, frosted
+panels. Two cascade rules matter:
+
+- Use `@theme` tokens (`bg-raise`, `text-faint`), never `bg-[--color-x]` --
+  that emits `background-color: --color-x`, invalid CSS that silently no-ops.
+- Custom classes live in `@layer components`. Written outside a layer they beat
+  every utility, so `.glass`'s border would override `border-y-0`.
+- Don't hand-write `-webkit-backdrop-filter`; it suppresses Lightning CSS's own
+  autoprefixing and the unprefixed property gets dropped.
 
 ## What is verified
 
