@@ -1,32 +1,27 @@
-"""Root reconciliation agent.
+"""Root agent.
 
-Placeholder wiring only. The sub-agent tree (schema mapping, matching, break
-analysis, reporting) lands once the transaction-flow model is defined -- until
-then this proves the model factory resolves and gives `adk web` something to
-attach to.
+Plain conversational agent for now: no tools, and no reconciliation direction.
+The no-arithmetic contract and the sub-agent tree land with the first real
+recon tools.
 """
 
 from __future__ import annotations
+
+from functools import lru_cache
 
 from google.adk.agents import LlmAgent
 
 from app.agents.models import orchestrator_model
 
-INSTRUCTION = """\
-You are the orchestrator of a multi-source reconciliation system.
-
-Sources are arbitrary CSVs with no fixed schema, reconciled in whatever
-direction the transaction flow demands. You never compute matches, sums, or
-balances yourself -- you call tools that run SQL, and you interpret what comes
-back. If a number did not come from a tool result, do not state it.
-"""
+INSTRUCTION = "You are a helpful assistant. Answer the user's questions directly."
 
 
+@lru_cache
 def build_root_agent() -> LlmAgent:
     return LlmAgent(
         name="orchestrator",
         model=orchestrator_model(),
-        description="Plans and drives a multi-source reconciliation run.",
+        description="Answers questions.",
         instruction=INSTRUCTION,
-        tools=[],  # populated as recon tools land
+        tools=[],
     )

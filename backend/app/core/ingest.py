@@ -1,10 +1,12 @@
 """CSV to SQLite ingestion.
 
-Each uploaded file becomes its own table (`ds_<id>`), preserving its original schema in `dataset_column`.
-This supports multi-source, multi-directional reconciliation without forcing a shared canonical schema.
+Each uploaded file becomes its own table (`ds_<id>`), preserving its original
+schema in `dataset_column`. This supports multi-source, multi-directional
+reconciliation without forcing a shared canonical schema.
 
-Type is definied based on values of each column, column with all integers becomes INTEGER, column with all floats becomes REAL,
-otherwise it remains TEXT.
+Type is definied based on values of each column, column with all integers
+becomes INTEGER, column with all floats becomes REAL, otherwise it remains
+TEXT.
 
 """
 
