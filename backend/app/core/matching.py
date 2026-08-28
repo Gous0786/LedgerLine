@@ -77,6 +77,68 @@ def _existing_group_keys(rule: str) -> set[str]:
     return {r["group_key"] for r in rows}
 
 
+def rule_status(rule: str) -> str:
+    row = db.query_one("SELECT status FROM rule_trust WHERE rule = ?", (rule,))
+    return row["status"] if row else "unproven"
+
+
+def _register_rule(rule: str) -> None:
+    db.execute(
+        "INSERT INTO rule_trust (rule, status) VALUES (?, 'unproven')"
+        " ON CONFLICT(rule) DO NOTHING",
+        (rule,),
+    )
+
+
+def list_rules() -> list[dict[str, Any]]:
+    return db.query(
+        "SELECT r.rule, r.status, r.first_seen, r.approved_at, r.approved_by,"
+        "  (SELECT COUNT(*) FROM match_proposal p WHERE p.rule = r.rule) AS proposals,"
+        "  (SELECT COUNT(*) FROM match_proposal p WHERE p.rule = r.rule"
+        "     AND p.status = 'pending') AS pending"
+        " FROM rule_trust r ORDER BY r.first_seen DESC"
+    )
+
+
+def trust_rule(rule: str, actor: str = "human", note: str | None = None) -> dict[str, Any]:
+    """Approve a rule, and accept the exact matches it is already holding.
+
+    Only `exact` proposals are released. Ambiguous and unbalanced ones still
+    need individual judgement -- approving the rule says the rule is right, not
+    that every group it produced is.
+    """
+    if not db.query_one("SELECT rule FROM rule_trust WHERE rule = ?", (rule,)):
+        raise MatchError(f"unknown rule {rule!r}")
+
+    pending = db.query(
+        "SELECT id FROM match_proposal"
+        " WHERE rule = ? AND status = 'pending' AND confidence = ?",
+        (rule, EXACT),
+    )
+    with db.cursor() as conn:
+        conn.execute("BEGIN")
+        try:
+            conn.execute(
+                "UPDATE rule_trust SET status = 'trusted', approved_at = datetime('now'),"
+                " approved_by = ?, note = ? WHERE rule = ?",
+                (actor, note, rule),
+            )
+            for r in pending:
+                conn.execute(
+                    "UPDATE match_proposal SET status = 'accepted' WHERE id = ?", (r["id"],)
+                )
+                conn.execute(
+                    "INSERT INTO match_event (proposal_id, kind, actor, detail)"
+                    " VALUES (?, 'accepted', ?, ?)",
+                    (r["id"], actor, json.dumps({"via": "rule approved", "rule": rule})),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return {"rule": rule, "status": "trusted", "released": len(pending)}
+
+
 def propose_matches(
     *,
     rule: str,
@@ -103,6 +165,9 @@ def propose_matches(
             f"query must return columns {sorted(REQUIRED_COLUMNS)};"
             f" missing {sorted(missing)}"
         )
+
+    _register_rule(rule)
+    trusted = rule_status(rule) == "trusted"
 
     lookup = _dataset_lookup()
     claimed = _claimed_rows()
@@ -191,7 +256,10 @@ def propose_matches(
         else:
             confidence = HIGH
 
-        status = "accepted" if confidence == EXACT else "pending"
+        # `exact` is necessary but not sufficient: an unscoped rule produces
+        # flawless matches for rows nobody asked about. A rule earns
+        # auto-accept by being approved once.
+        status = "accepted" if (confidence == EXACT and trusted) else "pending"
 
         with db.cursor() as conn:
             conn.execute("BEGIN")
@@ -225,7 +293,10 @@ def propose_matches(
                     conn.execute(
                         "INSERT INTO match_event (proposal_id, kind, actor, detail)"
                         " VALUES (?, 'auto_accepted', 'system', ?)",
-                        (pid, json.dumps({"reason": "exact: unique, balanced, cross-source"})),
+                        (pid, json.dumps({
+                            "reason": "exact, and rule previously approved",
+                            "rule": rule,
+                        })),
                     )
                 conn.execute("COMMIT")
             except Exception:
@@ -242,7 +313,7 @@ def propose_matches(
         else:
             counts["pending"] += 1
 
-        if len(sample) < 5:
+        if len(sample) < 12:
             sample.append(
                 {
                     "proposal_id": pid,
@@ -253,12 +324,17 @@ def propose_matches(
                 }
             )
 
+    created_keys = [g["group_key"] for g in sample]
     return {
         "rule": rule,
         "tier": tier,
+        "rule_status": "trusted" if trusted else "unproven",
         **counts,
         "unique_members": duplicates_collapsed,
         "by_confidence": by_confidence,
+        # The groups actually created -- if this is wider than what was asked
+        # about, the rule was not scoped.
+        "group_keys": created_keys,
         "sample": sample,
     }
 
@@ -453,7 +529,7 @@ def list_unmatched(
 
 def set_status(proposal_id: int, status: str, actor: str = "human",
                note: str | None = None) -> dict[str, Any]:
-    if status not in ("accepted", "rejected", "pending"):
+    if status not in ("accepted", "rejected", "pending", "review_later"):
         raise MatchError(f"bad status {status!r}")
     p = db.query_one("SELECT id FROM match_proposal WHERE id = ?", (proposal_id,))
     if not p:

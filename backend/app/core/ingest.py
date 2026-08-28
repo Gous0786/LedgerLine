@@ -346,6 +346,15 @@ def drop_dataset(dataset_id: str) -> bool:
         conn.execute("BEGIN")
         try:
             conn.execute(f"DROP TABLE IF EXISTS {_quote(row['table_name'])}")
+            # match_member.dataset_id is a plain column, not a foreign key, so
+            # nothing cascades. Without this the matches survive their own
+            # evidence and the reconciled view breaks on rows that are gone.
+            conn.execute(
+                "DELETE FROM match_proposal WHERE id IN ("
+                "  SELECT DISTINCT proposal_id FROM match_member WHERE dataset_id = ?"
+                ")",
+                (dataset_id,),
+            )
             conn.execute("DELETE FROM dataset WHERE id = ?", (dataset_id,))
             conn.execute("COMMIT")
         except Exception:

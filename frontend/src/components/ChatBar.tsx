@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { useChatState } from '@/state/ChatContext'
 import { useDatasets } from '@/state/DatasetsContext'
+import { PendingBanner } from '@/components/ProposalCards'
 
 export default function ChatBar() {
   const { send, stop, busy } = useChatState()
@@ -17,7 +18,8 @@ export default function ChatBar() {
   }
 
   return (
-    <div className="shrink-0 px-4 pb-4">
+    <div className="shrink-0 space-y-2 px-4 pb-4">
+      <PendingBanner />
       <div className="glass focus-within:border-accent/50 rounded-xl px-3 py-2.5 transition-colors">
         <textarea
           ref={textarea}

@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from 'react'
 import { getToolName, isToolUIPart } from 'ai'
 import type { ActivityData, ReconUIMessage } from '@/types/stream'
 import { useChatState } from '@/state/ChatContext'
+import { ProposeMatchesResult } from '@/components/ProposalCards'
 
 type AnyPart = ReconUIMessage['parts'][number]
 
@@ -120,7 +121,11 @@ function ToolEntry({ part }: { part: AnyPart }) {
 
         {errorText && <div className="mt-1 font-mono text-[11px] text-bad">{errorText}</div>}
 
-        {open && output !== undefined && <ToolOutput output={output} />}
+        {name === 'propose_matches' && output !== undefined ? (
+          <ProposeMatchesResult output={output} />
+        ) : (
+          open && output !== undefined && <ToolOutput output={output} />
+        )}
         {open && output === undefined && !errorText && (
           <div className="mt-1 font-mono text-[11px] text-faint">running…</div>
         )}

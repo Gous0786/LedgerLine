@@ -93,3 +93,106 @@ export function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
+
+// ------------------------------------------------------------ proposals --
+
+export type ProposalStatus = 'pending' | 'accepted' | 'rejected' | 'review_later'
+export type Confidence = 'exact' | 'high' | 'unbalanced' | 'ambiguous'
+
+export interface Proposal {
+  id: number
+  rule: string
+  tier: number
+  group_key: string
+  confidence: Confidence
+  status: ProposalStatus
+  member_count: number
+  datasets: string
+  dataset_names: string[]
+  balance_minor: number | null
+  description: string | null
+  created_at: string
+}
+
+export interface ProposalMember {
+  dataset_id: string
+  dataset: string
+  row: number
+  role: string | null
+  amount_minor: number | null
+  data: Record<string, unknown> | null
+}
+
+export interface ProposalEvent {
+  ts: string
+  kind: string
+  actor: string
+  detail: string | null
+}
+
+export interface ProposalDetail extends Proposal {
+  members: ProposalMember[]
+  events: ProposalEvent[]
+}
+
+export interface ProposalSummary {
+  by_status: Partial<Record<ProposalStatus, number>>
+  needs_review: number
+}
+
+export function listProposals(status: ProposalStatus | '' = '', limit = 200) {
+  const q = status ? `?status=${status}&limit=${limit}` : `?limit=${limit}`
+  return request<Proposal[]>(`/proposals${q}`)
+}
+
+export function getProposal(id: number) {
+  return request<ProposalDetail>(`/proposals/${id}`)
+}
+
+export function proposalSummary() {
+  return request<ProposalSummary>('/proposals/summary')
+}
+
+export function setProposalStatus(id: number, status: ProposalStatus, note?: string) {
+  return request<{ proposal_id: number; status: string }>(`/proposals/${id}/status`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, note }),
+  })
+}
+
+/** Minor units -> display string. Amounts are integers on purpose; float sums
+ *  do not compare equal, so they are only converted for rendering. */
+export function formatMinor(minor: number | null | undefined): string {
+  if (minor === null || minor === undefined) return '—'
+  const neg = minor < 0
+  const s = (Math.abs(minor) / 100).toFixed(2)
+  return (neg ? '-' : '') + s
+}
+
+// ---------------------------------------------------------------- rules --
+
+export interface RuleTrust {
+  rule: string
+  status: 'unproven' | 'trusted' | 'retired'
+  first_seen: string
+  approved_at: string | null
+  approved_by: string | null
+  proposals: number
+  pending: number
+}
+
+export function listRules() {
+  return request<RuleTrust[]>('/rules')
+}
+
+export function trustRule(rule: string, note?: string) {
+  return request<{ rule: string; status: string; released: number }>(
+    `/rules/${encodeURIComponent(rule)}/trust`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    },
+  )
+}

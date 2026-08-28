@@ -199,3 +199,114 @@ def find_join_candidates(dataset_ids: list[str] | None = None) -> dict[str, Any]
     pairs.sort(key=lambda p: (max(p["left_coverage"], p["right_coverage"]), p["overlap"]),
                reverse=True)
     return {"pairs": pairs[:40], "columns_compared": len(loaded)}
+
+
+def _identifier_columns(dataset_id: str, table: str) -> set[str]:
+    """Columns whose values are worth following.
+
+    A status column ("PAID") is not an identifier: following it drags in every
+    other row sharing that status. Same enum hazard as the join matrix, so the
+    same threshold applies -- a column must be high-cardinality to be followed.
+    """
+    out: set[str] = set()
+    for col in _columns(dataset_id):
+        if col["inferred_type"] not in ("TEXT", "INTEGER"):
+            continue
+        c = _quote(col["column_name"])
+        try:
+            stats = sqlguard.select_all(
+                get_settings().db_path,
+                f"SELECT COUNT(DISTINCT {c}) AS d, COUNT({c}) AS n FROM {_quote(table)}",
+            )[0]
+        except Exception:
+            continue
+        distinct, non_null = stats["d"] or 0, stats["n"] or 0
+        if distinct <= ENUM_MAX_DISTINCT and non_null > distinct * 2:
+            continue  # enum-like
+        out.add(col["column_name"])
+    return out
+
+
+def trace_record(value: str, max_hops: int = 2) -> dict[str, Any]:
+    """Follow one identifier across every dataset.
+
+    Answers "what happened to this record" without reconciling anything. Hop 0
+    finds rows holding the value directly; each further hop follows identifiers
+    found in those rows into other datasets, which is how an invoice reaches its
+    charge and the charge reaches its bank settlement.
+
+    Read-only. It records nothing and matches nothing.
+    """
+    value = (value or "").strip()
+    if not value:
+        return {"value": value, "hits": [], "note": "empty value"}
+
+    datasets = _datasets()
+    settings = get_settings()
+    columns_by_ds = {d["id"]: _columns(d["id"]) for d in datasets}
+    followable = {d["id"]: _identifier_columns(d["id"], d["table_name"]) for d in datasets}
+
+    seen_rows: set[tuple[str, int]] = set()
+    hits: list[dict[str, Any]] = []
+    frontier = {value}
+    followed: set[str] = set()
+
+    for hop in range(max_hops + 1):
+        if not frontier:
+            break
+        next_frontier: set[str] = set()
+
+        for token in sorted(frontier):
+            if token in followed:
+                continue
+            followed.add(token)
+            safe = token.replace("'", "''")
+
+            for ds in datasets:
+                table = _quote(ds["table_name"])
+                for col in columns_by_ds[ds["id"]]:
+                    # only search identifier-like columns, and never match a
+                    # value against a status/enum column
+                    if col["column_name"] not in followable[ds["id"]]:
+                        continue
+                    c = _quote(col["column_name"])
+                    try:
+                        rows = sqlguard.select_all(
+                            settings.db_path,
+                            f"SELECT * FROM {table} WHERE {c} = '{safe}' LIMIT 20",
+                        )
+                    except Exception:
+                        continue
+                    for r in rows:
+                        key = (ds["id"], int(r["__row"]))
+                        if key in seen_rows:
+                            continue
+                        seen_rows.add(key)
+                        hits.append(
+                            {
+                                "hop": hop,
+                                "dataset": ds["name"],
+                                "dataset_id": ds["id"],
+                                "row": int(r["__row"]),
+                                "matched_column": col["column_name"],
+                                "matched_value": token,
+                                "data": {k: v for k, v in r.items() if k != "__row"},
+                            }
+                        )
+                        for k, v in r.items():
+                            if k == "__row" or v is None:
+                                continue
+                            if k not in followable[ds["id"]]:
+                                continue
+                            sv = str(v).strip()
+                            if 3 <= len(sv) <= 64 and " " not in sv and sv not in followed:
+                                next_frontier.add(sv)
+
+        frontier = next_frontier
+
+    hits.sort(key=lambda h: (h["hop"], h["dataset"], h["row"]))
+    return {
+        "value": value,
+        "datasets_touched": sorted({h["dataset"] for h in hits}),
+        "hits": hits,
+    }

@@ -4,20 +4,25 @@ import StatePanel from '@/components/StatePanel'
 import MetricsPanel from '@/components/MetricsPanel'
 import ActivityStream from '@/components/ActivityStream'
 import DataView from '@/components/DataView'
+import ReconciledTab from '@/components/ReconciledTab'
+import ProposalModal from '@/components/ProposalModal'
 import ChatBar from '@/components/ChatBar'
 import { ChatProvider, useChatState } from '@/state/ChatContext'
 import { DatasetsProvider } from '@/state/DatasetsContext'
+import { ProposalsProvider, useProposals } from '@/state/ProposalsContext'
 
-type Mode = 'activity' | 'data'
+type Mode = 'activity' | 'data' | 'reconciled'
 
 const MODES: { id: Mode; label: string }[] = [
   { id: 'activity', label: 'Activity' },
   { id: 'data', label: 'Data' },
+  { id: 'reconciled', label: 'Reconciled' },
 ]
 
 function Workspace() {
   const [mode, setMode] = useState<Mode>('data')
   const { busy } = useChatState()
+  const { summary } = useProposals()
   const wasBusy = useRef(false)
 
   // Follow the work: when the agent starts, surface what it is doing. Only on
@@ -40,12 +45,19 @@ function Workspace() {
             }
           >
             {m.label}
+            {m.id === 'reconciled' && (summary?.needs_review ?? 0) > 0 && (
+              <span className="ml-1.5 rounded-full bg-warn/25 px-1.5 font-mono text-[10px] text-warn">
+                {summary?.needs_review}
+              </span>
+            )}
           </button>
         ))}
       </div>
 
       <div className="min-h-0 flex-1">
-        {mode === 'activity' ? <ActivityStream /> : <DataView />}
+        {mode === 'activity' && <ActivityStream />}
+        {mode === 'data' && <DataView />}
+        {mode === 'reconciled' && <ReconciledTab />}
       </div>
     </section>
   )
@@ -55,6 +67,7 @@ export default function App() {
   return (
     <DatasetsProvider>
       <ChatProvider>
+        <ProposalsProvider>
         <div className="flex h-full flex-col">
           <TopBar />
 
@@ -65,7 +78,9 @@ export default function App() {
           </div>
 
           <ChatBar />
+          <ProposalModal />
         </div>
+        </ProposalsProvider>
       </ChatProvider>
     </DatasetsProvider>
   )

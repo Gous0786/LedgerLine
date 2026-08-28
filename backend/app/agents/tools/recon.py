@@ -78,6 +78,22 @@ def find_join_candidates() -> dict[str, Any]:
     return discovery.find_join_candidates()
 
 
+def trace_record(value: str) -> dict[str, Any]:
+    """Follow one identifier across every dataset. READ ONLY -- records nothing.
+
+    Use this to answer questions about specific records: "what happened to
+    INV-2026-805", "where did this charge settle", "is this paid". It finds
+    every row holding the value, then follows the identifiers in those rows
+    into other sources, so an invoice reaches its charge and the charge reaches
+    its bank settlement.
+
+    This is the right tool for a question about particular records. Do not
+    reconcile in order to answer one -- reconciling writes state, and a question
+    is not a request to write.
+    """
+    return discovery.trace_record(value)
+
+
 # ----------------------------------------------------------------- query --
 
 def run_sql(sql: str) -> dict[str, Any]:
@@ -165,6 +181,14 @@ def propose_matches(rule: str, tier: int, sql: str, description: str) -> dict[st
       high        unique and cross-dataset, but no amounts to verify
       unbalanced  matched on key, but the amounts disagree
       ambiguous   a row could belong to more than one group -> always reviewed
+
+    YOUR QUERY DEFINES THE SCOPE. Everything it returns gets reconciled. If the
+    user asked about particular records, the query must filter to them -- an
+    unfiltered join reconciles the whole dataset, which is not what was asked.
+    The result includes `group_keys` so you can check what was actually created.
+
+    A new rule name is unproven: its matches wait for approval however confident
+    they look. Once the user approves the rule, later runs of it auto-accept.
 
     Rows already matched within the same relationship are skipped, so you do not
     need to exclude earlier tiers yourself. The same row may still be matched in
@@ -282,6 +306,7 @@ def get_row_history(dataset_id: str, row: int) -> dict[str, Any]:
 
 ALL_TOOLS = [
     list_datasets,
+    trace_record,
     profile_columns,
     find_join_candidates,
     run_sql,
