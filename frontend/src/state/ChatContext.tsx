@@ -54,8 +54,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const { messages, sendMessage, status, error, stop } = useChat<ReconUIMessage>({
     transport: new DefaultChatTransport({ api: '/api/chat' }),
     onData: (part) => {
-      // Metrics ride in as transient parts: they reach onData but never enter
-      // message history, so this is the only place to catch them.
       if (part.type === 'data-metrics') {
         const d = part.data as MetricsData
         setMetrics((m) => ({
