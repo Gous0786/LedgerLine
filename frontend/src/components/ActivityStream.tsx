@@ -12,6 +12,7 @@ import { getToolName, isToolUIPart } from 'ai'
 import type { ActivityData, ReconUIMessage } from '@/types/stream'
 import { useChatState } from '@/state/ChatContext'
 import { ProposeMatchesResult } from '@/components/ProposalCards'
+import Markdown from '@/components/Markdown'
 
 type AnyPart = ReconUIMessage['parts'][number]
 
@@ -139,9 +140,9 @@ function PartEntry({ part }: { part: AnyPart }) {
     return (
       <div className="flex gap-2.5">
         <Dot className="bg-accent" />
-        <p className="min-w-0 flex-1 text-[13px] leading-relaxed whitespace-pre-wrap">
-          {part.text}
-        </p>
+        <div className="min-w-0 flex-1">
+          <Markdown text={part.text} />
+        </div>
       </div>
     )
   }
