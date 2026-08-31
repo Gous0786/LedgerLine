@@ -1,9 +1,15 @@
 """Reconciliation run endpoints.
 
-Listing and event replay work today; starting a run arrives with the agent.
-`GET /runs/{id}/events` is the replay path -- the frontend reconnects with its
-last `seq` and gets everything it missed, since every streamed chunk is
-persisted to `run_event` before it goes out over the wire.
+A run is one agent turn. It is opened by `agents/runner.run` and recorded by
+`core/runlog`, so listing a run and replaying what it did both work off the same
+rows the turn wrote as it went.
+
+`GET /runs/{id}/events` is the replay path: the frontend reconnects with its
+last `seq` and gets everything after it. What is persisted is one row per
+*semantic* event -- each tool call with its arguments and full result, each
+prose or reasoning block, errors, and the turn's metrics -- not one row per
+streamed delta. Replay reconstructs what happened; it does not re-animate the
+typing.
 """
 
 from __future__ import annotations

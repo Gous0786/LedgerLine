@@ -194,28 +194,30 @@ export default function ReconciledTab() {
         </div>
       </div>
 
-      {/* Pending stays rule-grouped in both views: a rule producing far more
-          matches than asked for is only visible when they are grouped by it. */}
-      {pending.length > 0 && (
-        <>
-          <div className="eyebrow mb-1.5">Awaiting your decision</div>
-          <PendingByRule />
-        </>
-      )}
-
+      {/* The toggle governs everything. Previously the pending queue was always
+          rule-grouped, so "by transaction" showed rule cards and buried the
+          transactions below them -- the toggle looked broken because it was. */}
       {groupBy === 'transaction' ? (
         <TransactionView />
       ) : (
-        accepted.length > 0 && (
-          <>
-            <div className="eyebrow mb-1.5">Reconciled</div>
-            <div className="space-y-1">
-              {accepted.map((p) => (
-                <Row key={p.id} p={p} />
-              ))}
-            </div>
-          </>
-        )
+        <>
+          {pending.length > 0 && (
+            <>
+              <div className="eyebrow mb-1.5">Awaiting your decision</div>
+              <PendingByRule />
+            </>
+          )}
+          {accepted.length > 0 && (
+            <>
+              <div className="eyebrow mb-1.5">Reconciled</div>
+              <div className="space-y-1">
+                {accepted.map((p) => (
+                  <Row key={p.id} p={p} />
+                ))}
+              </div>
+            </>
+          )}
+        </>
       )}
     </div>
   )

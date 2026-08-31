@@ -12,6 +12,12 @@ instruction the model forgets once produces silent false matches:
 2.  Confidence is computed, never supplied. A row that could join two ways is
     `ambiguous` by structure regardless of how plausible it looks.
 3.  Only `exact` auto-accepts. Everything else waits for a human.
+
+A fourth is deliberately *not* here. Everything above is computed from the
+numbers the agent's SQL returned, so none of it can notice those numbers being
+wrong. Release is therefore gated on `app.core.verify`, which re-derives the
+figures from the source rows and shares nothing with this module but the row
+pointers. Nothing in this file writes `accepted` without it.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ import logging
 from typing import Any
 
 from app.config import get_settings
-from app.core import sqlguard
+from app.core import runlog, sqlguard, verify
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -112,6 +118,11 @@ def trust_rule(rule: str, actor: str = "human", note: str | None = None) -> dict
     Only `exact` proposals are released. Ambiguous and unbalanced ones still
     need individual judgement -- approving the rule says the rule is right, not
     that every group it produced is.
+
+    Approving the rule is also not a statement about its arithmetic, so each
+    held proposal is still verified individually on the way out. One that fails
+    stays pending and is named in the result: approving a rule should never be
+    the reason a bad figure got in.
     """
     if not db.query_one("SELECT rule FROM rule_trust WHERE rule = ?", (rule,)):
         raise MatchError(f"unknown rule {rule!r}")
@@ -121,28 +132,85 @@ def trust_rule(rule: str, actor: str = "human", note: str | None = None) -> dict
         " WHERE rule = ? AND status = 'pending' AND confidence IN (?, ?)",
         (rule, EXACT, WITHIN_TOLERANCE),
     )
+    db.execute(
+        "UPDATE rule_trust SET status = 'trusted', approved_at = datetime('now'),"
+        " approved_by = ?, note = ? WHERE rule = ?",
+        (actor, note, rule),
+    )
+
+    ctx = verify.Context()
+    released, blocked = 0, []
+    for r in pending:
+        outcome = release(
+            r["id"], actor=actor, reason=f"rule {rule!r} approved", ctx=ctx
+        )
+        if outcome["released"]:
+            released += 1
+        else:
+            blocked.append({
+                "proposal_id": r["id"],
+                "failures": outcome["verification"]["failures"],
+            })
+
+    return {
+        "rule": rule,
+        "status": "trusted",
+        "released": released,
+        "held_for_verification": len(blocked),
+        **({"verification_blocked": blocked[:10]} if blocked else {}),
+    }
+
+
+def release(
+    proposal_id: int,
+    actor: str,
+    reason: str,
+    kind: str = "accepted",
+    ctx: verify.Context | None = None,
+) -> dict[str, Any]:
+    """The single door to `accepted`.
+
+    Auto-accept, rule approval and a human clicking accept all come through
+    here, so "accepted" has one meaning: an independent pass re-derived the
+    figures from source rows and agreed. A failure is recorded against the
+    proposal rather than raised -- a blocked release is a finding, and the
+    reviewer needs to see why.
+    """
+    result = verify.gate(proposal_id, ctx)
+    if result["status"] != verify.PASS:
+        db.execute(
+            "INSERT INTO match_event (proposal_id, kind, actor, detail)"
+            " VALUES (?, 'verification_failed', 'system', ?)",
+            (proposal_id, json.dumps({
+                "verifier": result["verifier_version"],
+                "requested_by": actor,
+                "failures": result["failures"],
+            })),
+        )
+        log.warning("release blocked for proposal %s: %s", proposal_id, result["failures"])
+        return {"released": False, "verification": result}
+
     with db.cursor() as conn:
         conn.execute("BEGIN")
         try:
             conn.execute(
-                "UPDATE rule_trust SET status = 'trusted', approved_at = datetime('now'),"
-                " approved_by = ?, note = ? WHERE rule = ?",
-                (actor, note, rule),
+                "UPDATE match_proposal SET status = 'accepted' WHERE id = ?",
+                (proposal_id,),
             )
-            for r in pending:
-                conn.execute(
-                    "UPDATE match_proposal SET status = 'accepted' WHERE id = ?", (r["id"],)
-                )
-                conn.execute(
-                    "INSERT INTO match_event (proposal_id, kind, actor, detail)"
-                    " VALUES (?, 'accepted', ?, ?)",
-                    (r["id"], actor, json.dumps({"via": "rule approved", "rule": rule})),
-                )
+            conn.execute(
+                "INSERT INTO match_event (proposal_id, kind, actor, detail)"
+                " VALUES (?, ?, ?, ?)",
+                (proposal_id, kind, actor, json.dumps({
+                    "reason": reason,
+                    "verifier": result["verifier_version"],
+                    "invariants_checked": result["checked"],
+                })),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
-    return {"rule": rule, "status": "trusted", "released": len(pending)}
+    return {"released": True, "verification": result}
 
 
 def propose_matches(
@@ -155,6 +223,10 @@ def propose_matches(
     run_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute the agent's matching SQL and record the resulting groups."""
+    # Attribution comes from the turn, not from the agent: asking the model to
+    # supply a run id would put it in the tool schema, and it has no business
+    # knowing one. See app/core/runlog.py.
+    run_id = run_id or runlog.current()
     raw = sqlguard.select_all(get_settings().db_path, sql)
     if not raw:
         return {
@@ -238,6 +310,7 @@ def propose_matches(
         "proposed": 0,
         "auto_accepted": 0,
         "pending": 0,
+        "blocked_by_verification": 0,
         "skipped_already_matched": 0,
         "skipped_duplicate": 0,
         "skipped_single_member": 0,
@@ -245,6 +318,10 @@ def propose_matches(
     by_confidence: dict[str, int] = {}
     sample: list[dict[str, Any]] = []
     residual_absorbed = 0   # signed sum of what tolerance let through
+    blocked: list[dict[str, Any]] = []
+    # Built on first use: a rule with nothing to auto-accept should not pay for
+    # the metadata scan.
+    verify_ctx: verify.Context | None = None
 
     for key, members in collapsed.items():
         if key in seen_keys:
@@ -281,8 +358,12 @@ def propose_matches(
         # `exact` is necessary but not sufficient: an unscoped rule produces
         # flawless matches for rows nobody asked about. A rule earns
         # auto-accept by being approved once.
-        status = "accepted" if (confidence in AUTO_ACCEPTABLE and trusted) else "pending"
+        eligible = confidence in AUTO_ACCEPTABLE and trusted
 
+        # Always lands pending. Even an eligible group is written unaccepted
+        # first, because the verifier reads it back out of the database and
+        # cannot run against rows that do not exist yet -- and a proposal that
+        # was never `accepted` until something checked it is the whole point.
         with db.cursor() as conn:
             conn.execute("BEGIN")
             try:
@@ -291,9 +372,9 @@ def propose_matches(
                     " (run_id, rule, tier, group_key, confidence, status,"
                     "  member_count, datasets, balance_minor, description,"
                     "  tolerance_minor)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    " VALUES (?,?,?,?,?,'pending',?,?,?,?,?)",
                     (
-                        run_id, rule, tier, key, confidence, status,
+                        run_id, rule, tier, key, confidence,
                         len(members), edge, balance, description,
                         tolerance_minor,
                     ),
@@ -313,19 +394,29 @@ def propose_matches(
                     " VALUES (?, 'proposed', 'agent', ?)",
                     (pid, json.dumps({"rule": rule, "tier": tier, "confidence": confidence})),
                 )
-                if status == "accepted":
-                    conn.execute(
-                        "INSERT INTO match_event (proposal_id, kind, actor, detail)"
-                        " VALUES (?, 'auto_accepted', 'system', ?)",
-                        (pid, json.dumps({
-                            "reason": "exact, and rule previously approved",
-                            "rule": rule,
-                        })),
-                    )
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+
+        status = "pending"
+        if eligible:
+            verify_ctx = verify_ctx or verify.Context()
+            outcome = release(
+                pid, actor="system",
+                reason=f"{confidence}, and rule {rule!r} previously approved",
+                kind="auto_accepted", ctx=verify_ctx,
+            )
+            if outcome["released"]:
+                status = "accepted"
+            else:
+                counts["blocked_by_verification"] += 1
+                if len(blocked) < 10:
+                    blocked.append({
+                        "proposal_id": pid,
+                        "group_key": key,
+                        "failures": outcome["verification"]["failures"],
+                    })
 
         counts["proposed"] += 1
         by_confidence[confidence] = by_confidence.get(confidence, 0) + 1
@@ -366,6 +457,10 @@ def propose_matches(
         # about, the rule was not scoped.
         "group_keys": created_keys,
         "sample": sample,
+        # Only present when something failed: a rule whose amounts do not trace
+        # back to the source rows is a broken rule, and the counts alone do not
+        # say so loudly enough.
+        **({"verification_blocked": blocked} if blocked else {}),
     }
 
 
@@ -558,12 +653,52 @@ def list_unmatched(
 # Called by the API on human action -- deliberately not exposed to the agent.
 
 def set_status(proposal_id: int, status: str, actor: str = "human",
-               note: str | None = None) -> dict[str, Any]:
+               note: str | None = None, force: bool = False) -> dict[str, Any]:
+    """Record a human decision.
+
+    Accepting goes through verification like every other route to `accepted`.
+    This is the path that most needed it: a proposal can sit pending for a long
+    time, and the reviewer clicking accept is not in a position to notice that
+    the rows behind it have since been claimed by another match, or that its
+    amounts never traced to the source in the first place.
+
+    `force` is a deliberate override, not a bypass -- it is recorded as one, so
+    the audit trail shows a person overruled a failed check rather than showing
+    a clean acceptance.
+    """
     if status not in ("accepted", "rejected", "pending", "review_later"):
         raise MatchError(f"bad status {status!r}")
-    p = db.query_one("SELECT id FROM match_proposal WHERE id = ?", (proposal_id,))
+    p = db.query_one("SELECT id, status FROM match_proposal WHERE id = ?", (proposal_id,))
     if not p:
         raise MatchError(f"no proposal {proposal_id}")
+
+    if status == "accepted":
+        outcome = release(proposal_id, actor=actor, reason=note or "accepted by reviewer")
+        v = outcome["verification"]
+        if outcome["released"]:
+            return {
+                "proposal_id": proposal_id, "status": "accepted",
+                "verification": {"status": v["status"], "checked": v["checked"]},
+            }
+        if not force:
+            return {
+                "proposal_id": proposal_id,
+                "status": p["status"],          # unchanged
+                "blocked": True,
+                "verification": v,
+            }
+        db.execute(
+            "INSERT INTO match_event (proposal_id, kind, actor, detail)"
+            " VALUES (?, 'verification_overridden', ?, ?)",
+            (proposal_id, actor, json.dumps({
+                "note": note, "failures": v["failures"],
+                "verifier": v["verifier_version"],
+            })),
+        )
+        log.warning(
+            "proposal %s accepted by %s over a failed verification: %s",
+            proposal_id, actor, v["failures"],
+        )
 
     with db.cursor() as conn:
         conn.execute("BEGIN")

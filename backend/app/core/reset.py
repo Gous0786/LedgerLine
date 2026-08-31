@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 # Order matters only for readability; foreign keys cascade the rest.
 _TABLES = (
+    "verification",
     "match_proposal",   # cascades match_member and match_event
     "rule_trust",
     "pattern",

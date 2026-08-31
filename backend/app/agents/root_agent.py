@@ -11,6 +11,7 @@ from functools import lru_cache
 
 from google.adk.agents import LlmAgent
 
+from app.agents import callbacks
 from app.agents.models import orchestrator_model
 from app.agents.tools import ALL_TOOLS
 
@@ -41,8 +42,10 @@ TO RECONCILE
    Never re-query a table you have already seen. Investigate anomalies AFTER
    the first pass, using list_unmatched on what is left, not by exploring every
    oddity up front.
-6. Write rules only for what auto_match_exact could not do - chiefly aggregate
-   or batch matches, where one row on one side covers many on the other. Scope
+6. Write rules only for what auto_match_exact could not do. It already handles
+   row-level, batch (SUM of many = one) and partitioned joins, so what is left
+   is what it listed under `declined` - many-to-many edges, where the answer is
+   usually to match through the sources either side rather than directly. Scope
    each query to what was asked.
 
 RULES
@@ -51,6 +54,11 @@ Never calculate. Every figure you report must come from a tool result.
 Compare money as integers, CAST(ROUND(col*100) AS INTEGER), ideally inside a
 view so no rule can forget. Float sums do not compare equal. Allow a tolerance
 where rounding justifies one, and keep it tight.
+
+Every match is checked against the source rows before it is accepted. If
+propose_matches reports blocked_by_verification, an amount you computed is not
+in the data - suspect your CAST or a COALESCE, not the source. verify_match
+names the member and the cell.
 
 A row can belong to several matches at different stages - a charge settles an
 invoice AND sits in a bank payout. Read per-edge coverage, not overall: overall
@@ -75,4 +83,10 @@ def build_root_agent() -> LlmAgent:
         description="Analyses uploaded sources and reconciles them.",
         instruction=INSTRUCTION,
         tools=ALL_TOOLS,
+        # Guardrails that are not about any single tool: run recording, and the
+        # cap that stops one result flooding the context for the rest of the
+        # session. See app/agents/callbacks.py.
+        before_model_callback=callbacks.before_model,
+        after_model_callback=callbacks.after_model,
+        after_tool_callback=callbacks.after_tool,
     )

@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from app.config import get_settings
-from app.core import automatch, discovery, matching, spine, sqlguard
+from app.core import automatch, discovery, matching, spine, sqlguard, verify
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -144,16 +144,20 @@ def create_view(name: str, sql: str) -> dict[str, Any]:
 def auto_match_exact() -> dict[str, Any]:
     """Run the obvious pass first. Deterministic, no reasoning required.
 
-    Joins every identifier pair the overlap matrix found, discovers the
-    matching amount column on each, and records the groups. Clears the bulk of
-    a reconciliation in one call for zero tokens.
+    For every identifier pair the overlap matrix found, works out what kind of
+    relationship it is and matches accordingly: row-level equality where both
+    sides are unique, the aggregate identity SUM(many) = one for batch
+    settlements, or a single class of rows on the many side where only that
+    class corresponds (a ledger's revenue lines, not its fee lines). Amount
+    columns are discovered by measured agreement, never by name. Clears the
+    bulk of a reconciliation in one call for zero tokens.
 
-    ALWAYS CALL THIS FIRST. Then work only on what it leaves behind: read
-    reconciliation_status and list_unmatched, and investigate the remainder.
-    Do not hand-write rules for joins this already covers.
+    ALWAYS CALL THIS FIRST. Then work only on what it leaves behind.
 
-    It only does row-level equality. Batch settlements, where one credit covers
-    many rows, still need an aggregate rule from you.
+    Read `declined` before anything else. Those are edges where a key is shared
+    but the relationship is many-to-many, so no group built on it could be
+    verified. They are the part that needs you, and usually the answer is to
+    match through the sources either side rather than directly.
     """
     return automatch.auto_match_exact()
 
@@ -233,6 +237,21 @@ def list_unmatched(dataset_id: str, counterpart_dataset_id: str, limit: int) -> 
         return {"error": str(exc)}
 
 
+def verify_match(proposal_id: int) -> dict[str, Any]:
+    """Check a match against the source rows. Changes no status.
+
+    Re-reads every amount out of the row it claims to come from, re-balances
+    the group, and reports which cell each figure traced to. Run it when
+    propose_matches reports `blocked_by_verification`: the failure names the
+    member whose amount is not in the data, which is nearly always a CAST or a
+    COALESCE in your query rather than a real break.
+    """
+    try:
+        return verify.verify_proposal(proposal_id)
+    except verify.VerifyError as exc:
+        return {"error": str(exc)}
+
+
 def get_row_history(dataset_id: str, row: int) -> dict[str, Any]:
     """Every match a specific source row participates in, with its event
     history in order. This is the audit trail for one transaction."""
@@ -263,6 +282,7 @@ ALL_TOOLS = [
     propose_matches,
     list_proposals,
     get_proposal,
+    verify_match,
     reconciliation_status,
     list_unmatched,
     get_row_history,

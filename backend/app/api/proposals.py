@@ -2,6 +2,10 @@
 
 Accepting and rejecting live here rather than in the agent's toolset: the
 agent proposes, a person decides.
+
+Deciding is not the last word either. Accepting runs the verifier first, and a
+proposal whose figures no longer trace back to its source rows comes back as a
+409 with the failed invariants rather than being recorded as reconciled.
 """
 
 from __future__ import annotations
@@ -11,7 +15,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.core import matching
+from app.core import matching, verify
 from app.db import connection as db
 
 router = APIRouter(prefix="/proposals", tags=["proposals"])
@@ -24,6 +28,9 @@ VALID_STATUS = ("pending", "accepted", "rejected", "review_later")
 class StatusUpdate(BaseModel):
     status: str
     note: str | None = None
+    # Accept despite a failed verification. Recorded as an override, never as a
+    # clean acceptance -- see matching.set_status.
+    force: bool = False
 
 
 @router.get("/summary")
@@ -83,11 +90,22 @@ async def set_status(proposal_id: int, body: StatusUpdate) -> dict[str, Any]:
     if body.status not in VALID_STATUS:
         raise HTTPException(400, f"status must be one of {VALID_STATUS}")
     try:
-        return await db.run(
-            matching.set_status, proposal_id, body.status, "human", body.note
+        result = await db.run(
+            matching.set_status, proposal_id, body.status, "human", body.note, body.force
         )
     except matching.MatchError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+    # 409, not 400: the request was well-formed and the proposal is real -- the
+    # data underneath it disagrees. The failed invariants go back so the UI can
+    # say which one, and the reviewer can retry with force.
+    if result.get("blocked"):
+        raise HTTPException(409, {
+            "message": "verification failed; proposal not accepted",
+            "failures": result["verification"]["failures"],
+            "invariants": result["verification"]["invariants"],
+        })
+    return result
 
 
 @router.get("/{proposal_id}/events")
@@ -98,6 +116,40 @@ async def get_events(proposal_id: int) -> list[dict[str, Any]]:
         " WHERE proposal_id = ? ORDER BY id",
         (proposal_id,),
     )
+
+
+@router.post("/{proposal_id}/verify")
+async def verify_one(proposal_id: int) -> dict[str, Any]:
+    """Re-run every invariant against one proposal, and record the result.
+
+    Read-only with respect to the reconciliation: it changes no status. Use it
+    to inspect a match, or to re-check an accepted one after the data moved.
+    """
+    try:
+        return await db.run(verify.verify_proposal, proposal_id)
+    except verify.VerifyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{proposal_id}/verification")
+async def latest_verification(proposal_id: int) -> dict[str, Any]:
+    """The most recent recorded verification, or nulls if never verified."""
+    found = await db.run(verify.latest, proposal_id)
+    return found or {"proposal_id": proposal_id, "status": None, "invariants": []}
+
+
+class SweepRequest(BaseModel):
+    # Defaults to what matters: everything currently counted as reconciled.
+    status: str = "accepted"
+    limit: int = 500
+
+
+@router.post("/verify")
+async def verify_sweep(body: SweepRequest) -> dict[str, Any]:
+    """Re-verify in bulk. Reports failures; changes nothing."""
+    if body.status and body.status not in VALID_STATUS:
+        raise HTTPException(400, f"status must be one of {VALID_STATUS} or empty")
+    return await db.run(verify.sweep, body.status, body.limit)
 
 
 class TrustUpdate(BaseModel):

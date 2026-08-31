@@ -216,6 +216,19 @@ export interface TxLeg {
 
 export type TxState = 'reconciled' | 'pending' | 'exception' | 'incomplete' | 'unmatched'
 
+export type HopState = 'matched' | 'tolerance' | 'unchecked' | 'off' | 'ambiguous' | 'missing'
+
+export interface TxHop {
+  from: string
+  to: string
+  state: HopState
+  balance_minor?: number | null
+  proposal_id?: number
+  is_batch?: boolean
+  batch_size?: number
+  duplicate_in?: string[]
+}
+
 export interface Transaction {
   key: string
   spine_row: number
@@ -224,10 +237,13 @@ export interface Transaction {
   leg_count: number
   expected_legs: number
   legs: TxLeg[]
+  hops: TxHop[]
+  reason: string | null
 }
 
 export interface TransactionsView {
   spine: { dataset_id: string; name: string; reason?: string; origin?: string }
+  stages: string[]
   modal_legs: number
   transactions: Transaction[]
   leftovers: { dataset: string; dataset_id: string; count: number; rows: Record<string, unknown>[] }[]

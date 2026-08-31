@@ -1,7 +1,9 @@
 """Chat endpoint consumed by `useChat` on the frontend.
 
 Drives the ADK agent and translates its events into the AI SDK UI Message
-Stream. No tools are registered yet -- this is plain conversation.
+Stream. Each request is one turn and one run: `agents.runner.run` opens the run
+row before the first event, so everything the turn produces -- tool calls,
+proposals, cost -- is attributable to it.
 """
 
 from __future__ import annotations

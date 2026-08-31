@@ -206,6 +206,26 @@ def infer_spine() -> dict[str, Any]:
     }
 
 
+def stage_order() -> list[dict[str, Any]]:
+    """Sources in the order a transaction moves through them.
+
+    Same signal as the spine itself -- earliest events first -- so the flow
+    reads order, then processor, then bank. Sources with no usable timestamp
+    are appended in upload order rather than dropped.
+    """
+    datasets = db.query(
+        "SELECT id, name, table_name FROM dataset WHERE status = 'ready'"
+        " ORDER BY created_at"
+    )
+    dated, undated = [], []
+    for d in datasets:
+        when = _earliest_event(d["id"], d["table_name"])
+        entry = {"dataset_id": d["id"], "name": d["name"], "earliest_event": when}
+        (dated if when else undated).append(entry)
+    dated.sort(key=lambda e: e["earliest_event"])
+    return dated + undated
+
+
 def declared_spine() -> dict[str, Any] | None:
     row = db.query_one(
         "SELECT value, reason, set_by FROM app_setting WHERE key = ?", (SETTING_KEY,)

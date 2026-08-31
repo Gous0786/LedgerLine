@@ -21,6 +21,26 @@ than a predefined model.
 agent chooses strategies and interprets results; every figure the UI shows traces to
 a database row, not a token. The root agent's instruction enforces this.
 
+**A shared key is not a relationship.** Before proposing anything, the
+deterministic pass classifies each discovered join by cardinality and picks a
+strategy: row-level equality where both sides are unique, the aggregate identity
+`SUM(many) = one` for batch settlements, or a single partition of the many side
+where only one class of row corresponds. Where neither side is unique it
+declines and says why — a many-to-many join yields identifier-only groups that
+no amount can verify, and those read as progress while explaining nothing.
+Split credit/debit columns are republished as one signed column in a `v_*_norm`
+view first, so a statement has something comparable at all.
+
+**Nothing is accepted on its own say-so.** Confidence is computed from the numbers
+the matching SQL returned, so it cannot notice those numbers being wrong — a
+truncating `CAST`, or a `COALESCE(col, 0)` that turns a missing amount into a
+balancing zero, produces a group that ties perfectly and means nothing. Every
+route to `accepted` therefore passes through `core/verify.py`, which trusts only
+the `(dataset, row)` pointers and re-derives each figure from the source cell in
+exact decimal. An amount that appears nowhere in the row it claims to come from
+fails, and the proposal stays pending. A human can override with `force`, and the
+override is recorded as one.
+
 **The agent runs in the FastAPI process,** not behind a separate `adk api_server` —
 one event bus, one SQLite handle, no cross-process plumbing between the agent and
 the stream the UI reads.
@@ -41,6 +61,30 @@ behaviours are load-bearing:
 
 Contract lives in `backend/app/streaming/protocol.py` and mirrors
 `frontend/src/types/stream.ts`. Change one, change the other.
+
+## Evaluation
+
+The deterministic pipeline is scored against labelled data, so a change to
+matching is measured rather than eyeballed:
+
+```bash
+cd backend
+uv run python -m app.eval --fixture ../../reconriver/sample-100-v2
+uv run python -m app.eval --fixture <dir> --json > eval.json
+uv run python -m app.eval --fixture <dir> --max-false-auto-match 0.12   # CI gate
+```
+
+No LLM is involved — it runs ingest, `auto_match_exact`, the release gate and
+the verifier in a throwaway database, then compares the result to the fixture's
+`expected_reconciliation.csv`. A fixture whose CSVs no longer match its labels
+is rejected rather than scored.
+
+Ground truth distinguishes fifteen outcomes; this system can claim three
+(`MATCHED`, `EXCEPTION`, `MISSING`), so the outcomes collapse to those and the
+report names which ones were not recovered. The headline number is the **false
+auto-match rate** — of the groups that were actually released without a human,
+how many were not real matches. Missing a match costs an afternoon; inventing
+one puts a wrong figure in front of someone who signs it off.
 
 ## Setup
 

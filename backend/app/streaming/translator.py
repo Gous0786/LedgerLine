@@ -28,89 +28,10 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+from app.core import pricing, runlog
 from app.streaming import protocol as p
 
 log = logging.getLogger(__name__)
-
-
-_OPENROUTER_PRICES: dict[str, tuple[float, float]] | None = None
-
-
-def _openrouter_prices() -> dict[str, tuple[float, float]]:
-    """OpenRouter's own price sheet, fetched once per process.
-
-    ADK's usage_metadata carries token counts only -- the cost OpenRouter
-    reports is dropped in the LiteLLM mapping -- and LiteLLM's bundled sheet
-    lags new models, so anything recent prices at zero. Reading the live sheet
-    keeps the meter honest for models LiteLLM has never heard of.
-    """
-    global _OPENROUTER_PRICES
-    if _OPENROUTER_PRICES is not None:
-        return _OPENROUTER_PRICES
-    prices: dict[str, tuple[float, float]] = {}
-    try:
-        import json
-        import urllib.request
-
-        with urllib.request.urlopen(
-            "https://openrouter.ai/api/v1/models", timeout=15
-        ) as fh:
-            for m in json.load(fh).get("data", []):
-                pricing = m.get("pricing") or {}
-                try:
-                    prices[m["id"]] = (
-                        float(pricing.get("prompt") or 0),
-                        float(pricing.get("completion") or 0),
-                    )
-                except (TypeError, ValueError):
-                    continue
-    except Exception:
-        log.debug("could not fetch OpenRouter prices", exc_info=True)
-    _OPENROUTER_PRICES = prices
-    return prices
-
-
-def _cost_usd(candidates: list[str], prompt_tokens: int, completion_tokens: int) -> float:
-    """Best effort pricing, first candidate that LiteLLM knows wins.
-
-    Events report a bare model_version ("stealth/ox-alpha") while LiteLLM prices
-    by routed id ("openrouter/stealth/ox-alpha"), so both are tried. OpenRouter
-    also carries models with no price sheet at all -- those cost 0 rather than
-    failing the stream.
-    """
-    if prompt_tokens == 0 and completion_tokens == 0:
-        return 0.0
-
-    import litellm
-
-    for model in candidates:
-        if not model:
-            continue
-        try:
-            prompt_cost, completion_cost = litellm.cost_per_token(
-                model=model,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-            total = float(prompt_cost + completion_cost)
-            if total > 0:
-                return total
-        except Exception:
-            continue
-
-    # LiteLLM did not know it; try OpenRouter's live sheet, which is where the
-    # model actually ran.
-    sheet = _openrouter_prices()
-    for model in candidates:
-        if not model:
-            continue
-        key = model[len("openrouter/"):] if model.startswith("openrouter/") else model
-        rate = sheet.get(key)
-        if rate:
-            return prompt_tokens * rate[0] + completion_tokens * rate[1]
-
-    log.debug("no pricing for any of %s", candidates)
-    return 0.0
 
 
 async def translate(
@@ -127,6 +48,13 @@ async def translate(
     streamed_reasoning = False
     final_text = ""
     final_reasoning = ""
+
+    # Accumulated so the run log can keep one row per block rather than one per
+    # delta. Replaying a turn does not need to re-animate it, and a long reply
+    # is hundreds of deltas -- persisting each would make the audit trail cost
+    # more than the work it records.
+    text_buf: list[str] = []
+    reasoning_buf: list[str] = []
 
     prompt_tokens = 0
     completion_tokens = 0
@@ -150,7 +78,9 @@ async def translate(
                 )
 
             if getattr(event, "error_message", None) or getattr(event, "error_code", None):
-                yield p.error(str(event.error_message or event.error_code))
+                detail = str(event.error_message or event.error_code)
+                runlog.event("error", {"message": detail}, agent=author)
+                yield p.error(detail)
                 continue
 
             usage = getattr(event, "usage_metadata", None)
@@ -183,7 +113,7 @@ async def translate(
             is_partial = bool(getattr(event, "partial", False))
 
             for part in parts:
-                # --- tool calls (no tools are registered yet; mapped anyway) ---
+                # --- tool calls ---
                 call = getattr(part, "function_call", None)
                 if call is not None:
                     call_id = getattr(call, "id", None) or uuid.uuid4().hex
@@ -211,6 +141,7 @@ async def translate(
                             reasoning_open = True
                             yield p.reasoning_start(reasoning_id)
                         yield p.reasoning_delta(reasoning_id, text)
+                        reasoning_buf.append(text)
                         streamed_reasoning = True
                     else:
                         final_reasoning = text
@@ -222,11 +153,16 @@ async def translate(
                     # settles the block instead of leaving it spinning.
                     if reasoning_open and reasoning_id is not None:
                         yield p.reasoning_end(reasoning_id)
+                        runlog.event(
+                            "reasoning", {"text": "".join(reasoning_buf)}, agent=author
+                        )
+                        reasoning_buf.clear()
                         reasoning_open = False
                     if text_id is None:
                         text_id = uuid.uuid4().hex
                         yield p.text_start(text_id)
                     yield p.text_delta(text_id, text)
+                    text_buf.append(text)
                     streamed_text = True
                 else:
                     # Aggregated final event -- keep it only as a fallback.
@@ -238,6 +174,7 @@ async def translate(
             yield p.reasoning_start(reasoning_id)
             yield p.reasoning_delta(reasoning_id, final_reasoning)
             yield p.reasoning_end(reasoning_id)
+            runlog.event("reasoning", {"text": final_reasoning}, agent=last_author)
             reasoning_open = False
             reasoning_id = None
 
@@ -245,16 +182,20 @@ async def translate(
             text_id = uuid.uuid4().hex
             yield p.text_start(text_id)
             yield p.text_delta(text_id, final_text)
+            text_buf.append(final_text)
 
     except Exception as exc:
         log.exception("agent run failed")
+        runlog.event("error", {"message": f"{type(exc).__name__}: {exc}"})
         yield p.error(f"{type(exc).__name__}: {exc}")
 
     finally:
         if reasoning_open and reasoning_id is not None:
             yield p.reasoning_end(reasoning_id)
+            runlog.event("reasoning", {"text": "".join(reasoning_buf)}, agent=last_author)
         if text_id is not None:
             yield p.text_end(text_id)
+            runlog.event("text", {"text": "".join(text_buf)}, agent=last_author)
 
         if last_author:
             yield p.activity(
@@ -266,10 +207,10 @@ async def translate(
             completion_tokens=completion_tokens,
             cached_tokens=cached_tokens,
             reasoning_tokens=reasoning_tokens,
-            cost_usd=_cost_usd(
+            cost_usd=pricing.cost_usd(
                 # configured id first (carries the openrouter/ prefix), then
                 # whatever the event reported.
-                [model or "", seen_model or "", f"openrouter/{seen_model}" if seen_model else ""],
+                pricing.candidates(model, seen_model),
                 prompt_tokens,
                 completion_tokens,
             ),
@@ -277,6 +218,19 @@ async def translate(
             model=seen_model,
             agent=last_author,
             model_calls=model_calls,
+        )
+        runlog.event(
+            "data-metrics",
+            {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cached_tokens": cached_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "model_calls": model_calls,
+                "model": seen_model,
+                "elapsed_ms": int((time.perf_counter() - started) * 1000),
+            },
+            agent=last_author,
         )
         yield p.finish_step()
         yield p.finish(reason="stop")

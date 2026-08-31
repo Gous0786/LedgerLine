@@ -68,6 +68,79 @@ def _label_column(dataset_id: str) -> str | None:
     return (text or [c["column_name"] for c in cols] or [None])[0]
 
 
+def _hops(legs: list[dict[str, Any]], stages: list[str]) -> list[dict[str, Any]]:
+    """Turn a transaction's legs into the gaps between consecutive stages.
+
+    A reconciliation is a chain, and the useful question is where it broke --
+    not which rules ran. Each adjacent pair of sources is one hop, and its state
+    is read off the leg that spans them.
+    """
+    out = []
+    for left, right in zip(stages, stages[1:], strict=False):
+        leg = next(
+            (
+                x for x in legs
+                if {left, right} <= {m["dataset"] for m in x["members"]}
+            ),
+            None,
+        )
+        if leg is None:
+            out.append({"from": left, "to": right, "state": "missing"})
+            continue
+
+        conf = leg["confidence"]
+        if conf in ("exact",):
+            state = "matched"
+        elif conf == "within_tolerance":
+            state = "tolerance"
+        elif conf == "high":
+            state = "unchecked"
+        elif conf == "ambiguous":
+            state = "ambiguous"
+        else:
+            state = "off"
+
+        # more than one row from a single source is a duplicate, not a chain
+        per_source = collections.Counter(m["dataset"] for m in leg["members"])
+        dupes = [d for d, n in per_source.items() if n > 1]
+
+        out.append({
+            "from": left,
+            "to": right,
+            "state": state,
+            "balance_minor": leg["balance_minor"],
+            "proposal_id": leg["proposal_id"],
+            "is_batch": leg["is_batch"],
+            "batch_size": leg["batch_size"],
+            "duplicate_in": dupes,
+        })
+    return out
+
+
+def _break_reason(hops: list[dict[str, Any]]) -> str | None:
+    """Why this transaction is not clean, stated as fact rather than diagnosis.
+
+    Deliberately does not name a cause. Two processor rows against one order
+    might be a duplicate charge or a refund, and telling them apart needs
+    domain knowledge this layer does not have -- so it reports what is there
+    and leaves the reading to the reviewer.
+    """
+    for h in hops:
+        if h["state"] == "off":
+            amount = abs(h.get("balance_minor") or 0) / 100
+            extra = ""
+            if h.get("duplicate_in"):
+                extra = f" ({', '.join(f'2+ {d} rows' for d in h['duplicate_in'])})"
+            return f"{h['from']} and {h['to']} differ by {amount:,.2f}{extra}"
+    for h in hops:
+        if h["state"] == "ambiguous":
+            return f"{h['to']} has more than one candidate"
+    for h in hops:
+        if h["state"] == "missing":
+            return f"nothing in {h['to']} matches"
+    return None
+
+
 def build(spine_dataset_id: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[str, Any]:
     """Group every proposal into per-transaction chains, plus what is left over."""
     spine_ds = db.query_one("SELECT * FROM dataset WHERE id = ?", (spine_dataset_id,))
@@ -111,6 +184,9 @@ def build(spine_dataset_id: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> d
     spine_rows = sqlguard.select_all(
         get_settings().db_path, f'SELECT * FROM "{spine_ds["table_name"]}" ORDER BY __row'
     )
+    from app.core import spine as spine_mod
+    stage_names = [s["name"] for s in spine_mod.stage_order()]
+
     label_col = _label_column(spine_dataset_id)
     labels: dict[str, dict[str, Any]] = {}
     for r in spine_rows:
@@ -176,9 +252,13 @@ def build(spine_dataset_id: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> d
         else:
             state = "reconciled"
 
+        hops = _hops(legs, stage_names)
         transactions.append(
             {
                 "key": label,
+                "hops": hops,
+                "reason": _break_reason(hops) if state in ("exception", "incomplete",
+                                                           "unmatched") else None,
                 "spine_row": info["row"],
                 "data": info["data"],
                 "state": state,
@@ -204,6 +284,7 @@ def build(spine_dataset_id: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> d
 
     return {
         "spine": {"dataset_id": spine_dataset_id, "name": spine_ds["name"]},
+        "stages": stage_names,
         "modal_legs": modal_legs,
         "transactions": transactions,
         "leftovers": _leftovers(datasets, attached, spine_dataset_id),
