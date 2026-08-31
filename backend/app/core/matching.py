@@ -31,9 +31,15 @@ MAX_GROUPS = 5_000
 
 # confidence values
 EXACT = "exact"
+WITHIN_TOLERANCE = "within_tolerance"
 HIGH = "high"
 AMBIGUOUS = "ambiguous"
 UNBALANCED = "unbalanced"
+
+# Confidences that a *trusted* rule may finalise without a human. A tolerance is
+# only as safe as the rule that set it, so within-tolerance rides on the same
+# approval gate as exact rather than getting a free pass.
+AUTO_ACCEPTABLE = (EXACT, WITHIN_TOLERANCE)
 
 
 class MatchError(Exception):
@@ -112,8 +118,8 @@ def trust_rule(rule: str, actor: str = "human", note: str | None = None) -> dict
 
     pending = db.query(
         "SELECT id FROM match_proposal"
-        " WHERE rule = ? AND status = 'pending' AND confidence = ?",
-        (rule, EXACT),
+        " WHERE rule = ? AND status = 'pending' AND confidence IN (?, ?)",
+        (rule, EXACT, WITHIN_TOLERANCE),
     )
     with db.cursor() as conn:
         conn.execute("BEGIN")
@@ -145,6 +151,7 @@ def propose_matches(
     tier: int,
     sql: str,
     description: str = "",
+    tolerance_minor: int = 0,
     run_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute the agent's matching SQL and record the resulting groups."""
@@ -166,6 +173,7 @@ def propose_matches(
             f" missing {sorted(missing)}"
         )
 
+    tolerance_minor = max(0, int(tolerance_minor or 0))
     _register_rule(rule)
     trusted = rule_status(rule) == "trusted"
 
@@ -226,6 +234,7 @@ def propose_matches(
     }
     by_confidence: dict[str, int] = {}
     sample: list[dict[str, Any]] = []
+    residual_absorbed = 0   # signed sum of what tolerance let through
 
     for key, members in collapsed.items():
         if key in seen_keys:
@@ -247,19 +256,22 @@ def propose_matches(
 
         if any((m["dataset_id"], m["row"]) in contested for m in members):
             confidence = AMBIGUOUS
-        elif has_amounts and balance != 0:
+        elif has_amounts and balance != 0 and abs(balance) > tolerance_minor:
             confidence = UNBALANCED
         elif len(datasets) < 2:
             confidence = AMBIGUOUS  # a "match" inside one source is not a match
         elif has_amounts:
-            confidence = EXACT
+            # Distinguished from EXACT on purpose: a residual absorbed by
+            # tolerance is still money that did not tie, and many small
+            # residuals add up to a real number.
+            confidence = EXACT if balance == 0 else WITHIN_TOLERANCE
         else:
             confidence = HIGH
 
         # `exact` is necessary but not sufficient: an unscoped rule produces
         # flawless matches for rows nobody asked about. A rule earns
         # auto-accept by being approved once.
-        status = "accepted" if (confidence == EXACT and trusted) else "pending"
+        status = "accepted" if (confidence in AUTO_ACCEPTABLE and trusted) else "pending"
 
         with db.cursor() as conn:
             conn.execute("BEGIN")
@@ -267,11 +279,13 @@ def propose_matches(
                 cur = conn.execute(
                     "INSERT INTO match_proposal"
                     " (run_id, rule, tier, group_key, confidence, status,"
-                    "  member_count, datasets, balance_minor, description)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "  member_count, datasets, balance_minor, description,"
+                    "  tolerance_minor)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         run_id, rule, tier, key, confidence, status,
                         len(members), edge, balance, description,
+                        tolerance_minor,
                     ),
                 )
                 pid = cur.lastrowid
@@ -305,6 +319,8 @@ def propose_matches(
 
         counts["proposed"] += 1
         by_confidence[confidence] = by_confidence.get(confidence, 0) + 1
+        if confidence == WITHIN_TOLERANCE and balance:
+            residual_absorbed += balance
         if status == "accepted":
             counts["auto_accepted"] += 1
             claimed.setdefault(edge, set()).update(
@@ -329,6 +345,10 @@ def propose_matches(
         "rule": rule,
         "tier": tier,
         "rule_status": "trusted" if trusted else "unproven",
+        "tolerance_minor": tolerance_minor,
+        # Each residual is individually acceptable; the total is the number that
+        # matters, and it is unexplained money either way.
+        "residual_absorbed_minor": residual_absorbed,
         **counts,
         "unique_members": duplicates_collapsed,
         "by_confidence": by_confidence,

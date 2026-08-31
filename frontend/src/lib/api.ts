@@ -97,7 +97,7 @@ export function formatBytes(n: number): string {
 // ------------------------------------------------------------ proposals --
 
 export type ProposalStatus = 'pending' | 'accepted' | 'rejected' | 'review_later'
-export type Confidence = 'exact' | 'high' | 'unbalanced' | 'ambiguous'
+export type Confidence = 'exact' | 'within_tolerance' | 'high' | 'unbalanced' | 'ambiguous'
 
 export interface Proposal {
   id: number
@@ -110,6 +110,7 @@ export interface Proposal {
   datasets: string
   dataset_names: string[]
   balance_minor: number | null
+  tolerance_minor: number
   description: string | null
   created_at: string
 }
@@ -195,4 +196,44 @@ export function trustRule(rule: string, note?: string) {
       body: JSON.stringify({ note }),
     },
   )
+}
+
+// --------------------------------------------------------- transactions --
+
+export interface TxLeg {
+  proposal_id: number
+  group_key: string
+  rule: string
+  tier: number
+  confidence: Confidence
+  status: ProposalStatus
+  balance_minor: number | null
+  tolerance_minor: number
+  is_batch: boolean
+  batch_size: number
+  members: { dataset: string; dataset_id: string; row: number }[]
+}
+
+export type TxState = 'reconciled' | 'pending' | 'exception' | 'incomplete' | 'unmatched'
+
+export interface Transaction {
+  key: string
+  spine_row: number
+  data: Record<string, unknown>
+  state: TxState
+  leg_count: number
+  expected_legs: number
+  legs: TxLeg[]
+}
+
+export interface TransactionsView {
+  spine: { dataset_id: string; name: string; reason?: string; origin?: string }
+  modal_legs: number
+  transactions: Transaction[]
+  leftovers: { dataset: string; dataset_id: string; count: number; rows: Record<string, unknown>[] }[]
+  counts: Partial<Record<TxState, number>>
+}
+
+export function listTransactions() {
+  return request<TransactionsView>('/transactions')
 }

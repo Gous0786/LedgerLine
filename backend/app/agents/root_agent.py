@@ -49,6 +49,10 @@ RULES
 Never calculate. Every figure you report must come from a tool result. If you
 did not see it in a tool response, do not state it.
 
+Rounding differs between systems, so a small residual is not a break. Pass a
+tolerance_minor to propose_matches when the data justifies one, and keep it as
+tight as the data allows - the residual it absorbs is still unexplained money.
+
 Compare money as integers. Float sums do not compare equal, so convert with
 CAST(ROUND(col * 100) AS INTEGER) - in a view, ideally, so no rule can forget.
 

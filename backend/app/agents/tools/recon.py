@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from app.config import get_settings
-from app.core import discovery, matching, sqlguard
+from app.core import discovery, matching, spine, sqlguard
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -94,6 +94,24 @@ def trace_record(value: str) -> dict[str, Any]:
     return discovery.trace_record(value)
 
 
+def set_spine(dataset_id: str, reason: str) -> dict[str, Any]:
+    """Declare which source starts a transaction, for the end-to-end view.
+
+    Call this when the user's request names the thing being reconciled --
+    "reconcile all orders" makes the orders source the spine, "trace every
+    payout" makes the payout source the spine. Give the reason in the user's
+    terms.
+
+    Without a declaration the spine is inferred from foreign-key structure,
+    which is usually right, so only call this when the request actually implies
+    a different starting point.
+    """
+    try:
+        return spine.set_spine(dataset_id, reason, actor="agent")
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+
 # ----------------------------------------------------------------- query --
 
 def run_sql(sql: str) -> dict[str, Any]:
@@ -152,7 +170,9 @@ def create_view(name: str, sql: str) -> dict[str, Any]:
 
 # ------------------------------------------------------------ reconciling --
 
-def propose_matches(rule: str, tier: int, sql: str, description: str) -> dict[str, Any]:
+def propose_matches(
+    rule: str, tier: int, sql: str, description: str, tolerance_minor: int
+) -> dict[str, Any]:
     """Propose reconciliation matches by running a matching query.
 
     You pass SQL, never rows. The query is executed, its rows are grouped, each
@@ -176,11 +196,19 @@ def propose_matches(rule: str, tier: int, sql: str, description: str) -> dict[st
     recorded as `unbalanced` and held for review; that is usually a real break,
     not a mistake in your query.
 
+    `tolerance_minor` is the residual you will accept, in minor units, per
+    group. Systems round differently, so a bank batch landing 2 cents from the
+    computed net is reconciled, not broken -- pass 100 to allow up to 1.00.
+    Pass 0 to demand an exact tie. Set it from what the data justifies, never
+    wide enough to make a real difference disappear: the residual it absorbs is
+    reported back and is still unexplained money.
+
     Confidence is computed here, not by you:
-      exact       unique, balanced, spans two datasets -> auto-accepted
-      high        unique and cross-dataset, but no amounts to verify
-      unbalanced  matched on key, but the amounts disagree
-      ambiguous   a row could belong to more than one group -> always reviewed
+      exact             balanced to zero
+      within_tolerance  residual non-zero but inside tolerance_minor
+      high              unique and cross-dataset, but no amounts to verify
+      unbalanced        residual exceeds tolerance -> held for review
+      ambiguous         a row could belong to more than one group -> reviewed
 
     YOUR QUERY DEFINES THE SCOPE. Everything it returns gets reconciled. If the
     user asked about particular records, the query must filter to them -- an
@@ -197,7 +225,8 @@ def propose_matches(rule: str, tier: int, sql: str, description: str) -> dict[st
     """
     try:
         return matching.propose_matches(
-            rule=rule, tier=tier, sql=sql, description=description
+            rule=rule, tier=tier, sql=sql, description=description,
+            tolerance_minor=tolerance_minor,
         )
     except (matching.MatchError, sqlguard.SqlError) as exc:
         return {"error": str(exc)}
@@ -307,6 +336,7 @@ def get_row_history(dataset_id: str, row: int) -> dict[str, Any]:
 ALL_TOOLS = [
     list_datasets,
     trace_record,
+    set_spine,
     profile_columns,
     find_join_candidates,
     run_sql,

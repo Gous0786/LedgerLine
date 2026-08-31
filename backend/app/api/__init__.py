@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api import chat, datasets, health, metrics, proposals, runs
+from app.api import chat, datasets, health, metrics, proposals, runs, transactions
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(health.router)
@@ -10,3 +10,4 @@ api_router.include_router(runs.router)
 api_router.include_router(metrics.router)
 api_router.include_router(proposals.router)
 api_router.include_router(proposals.rules_router)
+api_router.include_router(transactions.router)

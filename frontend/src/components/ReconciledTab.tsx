@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { formatMinor, getProposal, type Proposal, type ProposalDetail } from '@/lib/api'
 import { useProposals } from '@/state/ProposalsContext'
 import { CONFIDENCE_TONE } from '@/components/ProposalModal'
+import TransactionView from '@/components/TransactionView'
 
 /** Expanded row: the members that reconciled, and the events in order. */
 function Detail({ id }: { id: number }) {
@@ -150,8 +151,13 @@ function PendingByRule() {
   )
 }
 
+type GroupBy = 'transaction' | 'rule'
+
 export default function ReconciledTab() {
   const { accepted, pending, summary } = useProposals()
+  // Two ways to read the same matches: by transaction to audit one end to end,
+  // by rule to judge the rule that produced them.
+  const [groupBy, setGroupBy] = useState<GroupBy>('transaction')
 
   if (accepted.length === 0 && pending.length === 0) {
     return (
@@ -171,8 +177,25 @@ export default function ReconciledTab() {
         <span className="text-ok">{summary?.by_status.accepted ?? 0} reconciled</span>
         <span className="text-warn">{summary?.needs_review ?? 0} awaiting decision</span>
         <span className="text-faint">{summary?.by_status.rejected ?? 0} rejected</span>
+
+        <div className="ml-auto flex items-center gap-0.5 rounded-md border border-line p-0.5">
+          {(['transaction', 'rule'] as GroupBy[]).map((g) => (
+            <button
+              key={g}
+              onClick={() => setGroupBy(g)}
+              className={
+                'rounded px-2 py-0.5 text-[11px] transition-colors ' +
+                (groupBy === g ? 'bg-accent/20 text-ink' : 'text-faint hover:text-muted')
+              }
+            >
+              by {g}
+            </button>
+          ))}
+        </div>
       </div>
 
+      {/* Pending stays rule-grouped in both views: a rule producing far more
+          matches than asked for is only visible when they are grouped by it. */}
       {pending.length > 0 && (
         <>
           <div className="eyebrow mb-1.5">Awaiting your decision</div>
@@ -180,15 +203,19 @@ export default function ReconciledTab() {
         </>
       )}
 
-      {accepted.length > 0 && (
-        <>
-          <div className="eyebrow mb-1.5">Reconciled</div>
-          <div className="space-y-1">
-            {accepted.map((p) => (
-              <Row key={p.id} p={p} />
-            ))}
-          </div>
-        </>
+      {groupBy === 'transaction' ? (
+        <TransactionView />
+      ) : (
+        accepted.length > 0 && (
+          <>
+            <div className="eyebrow mb-1.5">Reconciled</div>
+            <div className="space-y-1">
+              {accepted.map((p) => (
+                <Row key={p.id} p={p} />
+              ))}
+            </div>
+          </>
+        )
       )}
     </div>
   )

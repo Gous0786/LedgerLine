@@ -10,6 +10,7 @@ import { useProposals } from '@/state/ProposalsContext'
 
 export const CONFIDENCE_TONE: Record<Confidence, string> = {
   exact: 'text-ok border-ok/40 bg-ok/10',
+  within_tolerance: 'text-ok/80 border-ok/30 bg-ok/5',
   high: 'text-cyan border-cyan/40 bg-cyan/10',
   unbalanced: 'text-warn border-warn/40 bg-warn/10',
   ambiguous: 'text-bad border-bad/40 bg-bad/10',
@@ -17,6 +18,8 @@ export const CONFIDENCE_TONE: Record<Confidence, string> = {
 
 const CONFIDENCE_WHY: Record<Confidence, string> = {
   exact: 'Unique match, amounts balance to zero, spans two sources.',
+  within_tolerance:
+    'Unique match. A residual remains but is inside the allowed tolerance — rounding, not a break.',
   high: 'Unique and cross-source, but there were no amounts to verify.',
   unbalanced: 'Matched on key, but the amounts disagree — usually a real break.',
   ambiguous: 'A row here could belong to more than one group.',
@@ -106,6 +109,9 @@ export default function ProposalModal() {
   }
 
   const balanced = detail?.balance_minor === 0
+  const absorbed =
+    detail && detail.balance_minor !== null && detail.balance_minor !== 0 &&
+    Math.abs(detail.balance_minor) <= (detail.tolerance_minor ?? 0)
 
   return (
     <div
@@ -166,13 +172,17 @@ export default function ProposalModal() {
                 <span
                   className={
                     'ml-auto font-mono text-[13px] tabular-nums ' +
-                    (balanced ? 'text-ok' : 'text-warn')
+                    (balanced ? 'text-ok' : absorbed ? 'text-ok/80' : 'text-warn')
                   }
                 >
                   {formatMinor(detail.balance_minor)}
                 </span>
                 <span className="font-mono text-[10px] text-faint">
-                  {balanced ? 'sums to zero' : 'does not balance'}
+                  {balanced
+                    ? 'sums to zero'
+                    : absorbed
+                      ? `residual within tolerance ${formatMinor(detail!.tolerance_minor)}`
+                      : 'does not balance'}
                 </span>
               </div>
 
