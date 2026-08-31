@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from app.config import get_settings
-from app.core import discovery, matching, spine, sqlguard
+from app.core import automatch, discovery, matching, spine, sqlguard
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -23,11 +23,7 @@ log = logging.getLogger(__name__)
 # --------------------------------------------------------- understanding --
 
 def list_datasets() -> dict[str, Any]:
-    """List every uploaded dataset with its columns and inferred types.
-
-    Start here. Returns each dataset's id, name, row count, and the columns
-    available to query, plus any normalisation views defined over it.
-    """
+    """Every dataset with its columns, types, row count and any views. Start here."""
     out = []
     for d in db.query(
         "SELECT id, name, row_count, table_name FROM dataset"
@@ -55,41 +51,28 @@ def list_datasets() -> dict[str, Any]:
 
 
 def profile_columns(dataset_id: str) -> dict[str, Any]:
-    """Per-column statistics for one dataset.
-
-    Returns distinct count, nulls, min/max, most common values, whether the
-    column is unique, and a pattern signature (e.g. `ch_3M01` -> `aa_9A99`).
-    Use it to tell identifiers from amounts, and to spot enum-like columns.
+    """Per-column stats: distinct count, nulls, min/max, top values, uniqueness
+    and a pattern signature. Use it to tell identifiers from amounts.
     """
     return discovery.profile_columns(dataset_id)
 
 
 def find_join_candidates() -> dict[str, Any]:
-    """Find which columns across different datasets hold the same values.
+    """Find columns across datasets holding the same values.
 
-    Measures actual value overlap between every column pair, so it discovers
-    join keys even when the column names differ completely. Returns pairs with
-    `overlap` (shared distinct values), `left_coverage` / `right_coverage`
-    (fraction of each side covered), and example values.
-
-    Coverage below 1.0 is meaningful: it means some values on that side have no
-    counterpart, which is usually where the breaks are.
+    Measures real value overlap, so it finds join keys whose names differ.
+    Returns overlap counts, per-side coverage and examples. Coverage below
+    1.0 means some values have no counterpart -- usually where breaks are.
     """
     return discovery.find_join_candidates()
 
 
 def trace_record(value: str) -> dict[str, Any]:
-    """Follow one identifier across every dataset. READ ONLY -- records nothing.
+    """Follow one identifier across every dataset. READ ONLY, records nothing.
 
-    Use this to answer questions about specific records: "what happened to
-    INV-2026-805", "where did this charge settle", "is this paid". It finds
-    every row holding the value, then follows the identifiers in those rows
-    into other sources, so an invoice reaches its charge and the charge reaches
-    its bank settlement.
-
-    This is the right tool for a question about particular records. Do not
-    reconcile in order to answer one -- reconciling writes state, and a question
-    is not a request to write.
+    The right tool for questions about specific records ("what happened to
+    INV-805"). Finds rows holding the value, then follows identifiers in
+    those rows into other sources. Never reconcile just to answer a question.
     """
     return discovery.trace_record(value)
 
@@ -97,14 +80,8 @@ def trace_record(value: str) -> dict[str, Any]:
 def set_spine(dataset_id: str, reason: str) -> dict[str, Any]:
     """Declare which source starts a transaction, for the end-to-end view.
 
-    Call this when the user's request names the thing being reconciled --
-    "reconcile all orders" makes the orders source the spine, "trace every
-    payout" makes the payout source the spine. Give the reason in the user's
-    terms.
-
-    Without a declaration the spine is inferred from foreign-key structure,
-    which is usually right, so only call this when the request actually implies
-    a different starting point.
+    Call only when the request names it -- "reconcile all orders" makes
+    orders the spine. Otherwise it is inferred from foreign keys.
     """
     try:
         return spine.set_spine(dataset_id, reason, actor="agent")
@@ -114,36 +91,30 @@ def set_spine(dataset_id: str, reason: str) -> dict[str, Any]:
 
 # ----------------------------------------------------------------- query --
 
-def run_sql(sql: str) -> dict[str, Any]:
-    """Run a read-only SELECT against the datasets and views.
+def run_sql(sql: str, limit: int) -> dict[str, Any]:
+    """Run one read-only SELECT (or WITH). Returns columns and `limit` rows.
 
-    Only a single SELECT or WITH statement is allowed. Returns the column names
-    and at most 50 rows. Use it to inspect data and to develop a matching query
-    before handing it to propose_matches.
+    Every result stays in context and is resent on every later turn, so keep
+    limit small -- 5 to 10 is enough to understand shape. Do not re-query a
+    table you have already seen.
 
-    Table names are the `table` field from list_datasets (e.g. ds_ab12cd34ef56),
-    or any view you created. Quote identifiers with double quotes.
+    For structure use profile_columns and find_join_candidates instead: they
+    return summaries, not rows, and cost a fraction as much.
     """
     try:
-        return sqlguard.select(get_settings().db_path, sql)
+        return sqlguard.select(get_settings().db_path, sql, limit=limit or 10)
     except sqlguard.SqlError as exc:
         return {"error": str(exc)}
 
 
 def create_view(name: str, sql: str) -> dict[str, Any]:
-    """Create (or replace) a named SQL view over a raw dataset.
+    """Create or replace a named SQL view (name must start with `v_`).
 
-    Use views to do normalisation once instead of repeating it in every rule:
-    convert money to integer minor units, collapse separate debit/credit
-    columns into one signed amount, tag reference namespaces, and classify
-    non-transaction rows.
+    Normalise once here instead of in every rule: money to integer minor
+    units via CAST(ROUND(col*100) AS INTEGER), separate debit/credit columns
+    into one signed amount, reference namespaces, non-transaction rows.
 
-    Money must be compared as integers. Floating point sums do not compare
-    equal -- 242.45 + 1164.90 != 1407.35 in float arithmetic -- so express
-    amounts as `CAST(ROUND(col * 100) AS INTEGER)` in the view and match on
-    that, never on the raw decimal.
-
-    `name` must start with `v_`. `sql` is the SELECT body of the view.
+    Float sums do not compare equal, so always match on the integer form.
     """
     if not name.startswith("v_") or not name.replace("_", "").isalnum():
         return {"error": "view name must start with 'v_' and be alphanumeric/underscore"}
@@ -170,58 +141,48 @@ def create_view(name: str, sql: str) -> dict[str, Any]:
 
 # ------------------------------------------------------------ reconciling --
 
+def auto_match_exact() -> dict[str, Any]:
+    """Run the obvious pass first. Deterministic, no reasoning required.
+
+    Joins every identifier pair the overlap matrix found, discovers the
+    matching amount column on each, and records the groups. Clears the bulk of
+    a reconciliation in one call for zero tokens.
+
+    ALWAYS CALL THIS FIRST. Then work only on what it leaves behind: read
+    reconciliation_status and list_unmatched, and investigate the remainder.
+    Do not hand-write rules for joins this already covers.
+
+    It only does row-level equality. Batch settlements, where one credit covers
+    many rows, still need an aggregate rule from you.
+    """
+    return automatch.auto_match_exact()
+
+
+
 def propose_matches(
     rule: str, tier: int, sql: str, description: str, tolerance_minor: int
 ) -> dict[str, Any]:
-    """Propose reconciliation matches by running a matching query.
+    """Propose matches by running a matching query. Pass SQL, never rows.
 
-    You pass SQL, never rows. The query is executed, its rows are grouped, each
-    group is scored from evidence, and the results are recorded and shown to the
-    user. Only counts and a small sample come back to you.
+    This is the cheap way to test a rule: it returns counts, never rows, and a
+    new rule name is unproven so nothing it creates is final. Send a query and
+    read the result rather than rehearsing it with run_sql.
+    Required columns: group_key, dataset, row (plus optional role,
+    amount_minor). A bad shape returns an error spelling out the contract.
 
-    The query MUST return these columns, one row per group member:
-      group_key    identifies the match group (e.g. the invoice id or payout id)
-      dataset      the dataset name or id the member row comes from
-      row          the member's __row value
-      role         optional label, e.g. 'invoice', 'charge', 'settlement'
-      amount_minor optional signed integer amount in minor units (cents)
+    Sign amount_minor so a balancing group sums to zero -- invoice +25000,
+    charge -25000. Wrong signs make correct matches look like breaks.
 
-    A group is any set of rows that reconcile together, so 1-to-1 and
-    many-to-1 use the same shape. A group needs at least two members spanning
-    at least two datasets.
+    YOUR QUERY DEFINES THE SCOPE. Everything it returns gets reconciled, so
+    filter to what was asked. Check `group_keys` in the result against the
+    request; wider means the rule was not scoped.
 
-    Sign convention: `amount_minor` must be signed so that a balancing group
-    sums to zero. Put one side positive and the other negative -- e.g. the
-    invoice +25000 and the charge -25000. Groups that do not sum to zero are
-    recorded as `unbalanced` and held for review; that is usually a real break,
-    not a mistake in your query.
+    tolerance_minor: residual allowed per group in minor units (100 = 1.00,
+    0 = exact tie). Keep it tight -- absorbed residual is still unexplained
+    money and is reported back.
 
-    `tolerance_minor` is the residual you will accept, in minor units, per
-    group. Systems round differently, so a bank batch landing 2 cents from the
-    computed net is reconciled, not broken -- pass 100 to allow up to 1.00.
-    Pass 0 to demand an exact tie. Set it from what the data justifies, never
-    wide enough to make a real difference disappear: the residual it absorbs is
-    reported back and is still unexplained money.
-
-    Confidence is computed here, not by you:
-      exact             balanced to zero
-      within_tolerance  residual non-zero but inside tolerance_minor
-      high              unique and cross-dataset, but no amounts to verify
-      unbalanced        residual exceeds tolerance -> held for review
-      ambiguous         a row could belong to more than one group -> reviewed
-
-    YOUR QUERY DEFINES THE SCOPE. Everything it returns gets reconciled. If the
-    user asked about particular records, the query must filter to them -- an
-    unfiltered join reconciles the whole dataset, which is not what was asked.
-    The result includes `group_keys` so you can check what was actually created.
-
-    A new rule name is unproven: its matches wait for approval however confident
-    they look. Once the user approves the rule, later runs of it auto-accept.
-
-    Rows already matched within the same relationship are skipped, so you do not
-    need to exclude earlier tiers yourself. The same row may still be matched in
-    a different relationship -- a charge settles an invoice AND belongs to a
-    bank payout.
+    Confidence is computed here, never supplied by you. Earlier tiers are
+    excluded automatically.
     """
     try:
         return matching.propose_matches(
@@ -248,22 +209,21 @@ def get_proposal(proposal_id: int) -> dict[str, Any]:
 
 
 def reconciliation_status() -> dict[str, Any]:
-    """Coverage so far, per dataset and per relationship.
+    """Coverage per dataset and per relationship.
 
-    Read the per-edge numbers, not the per-dataset ones: a gateway charge that
-    settles into the bank counts as matched overall even when no invoice
-    explains it. Only the edge breakdown reveals that gap.
+    Read the per-edge numbers: a charge that settles into the bank counts as
+    matched overall even when no invoice explains it. Only the edge
+    breakdown reveals that gap.
     """
     return matching.reconciliation_status()
 
 
 def list_unmatched(dataset_id: str, counterpart_dataset_id: str, limit: int) -> dict[str, Any]:
-    """Rows in `dataset_id` that have no accepted match.
+    """Rows with no accepted match.
 
-    Pass `counterpart_dataset_id` to ask about one relationship -- "which
-    charges have no invoice?" -- or an empty string to ask which rows are in no
-    match at all. Prefer the scoped form when hunting breaks in a multi-hop
-    flow.
+    Pass counterpart_dataset_id to scope to one relationship ("which charges
+    have no invoice?"), or "" for rows in no match at all. Prefer the scoped
+    form when hunting breaks in a multi-hop flow.
     """
     try:
         return matching.list_unmatched(
@@ -271,48 +231,6 @@ def list_unmatched(dataset_id: str, counterpart_dataset_id: str, limit: int) -> 
         )
     except matching.MatchError as exc:
         return {"error": str(exc)}
-
-
-# ---------------------------------------------------------------- memory --
-
-def save_pattern(kind: str, name: str, content: str, evidence: str) -> dict[str, Any]:
-    """Record something learned about this data for later batches.
-
-    `kind` is one of: join_key, transform, exclusion, namespace, tolerance.
-    `content` is the reusable fact (a join condition, a normalisation
-    expression, a filter). `evidence` is why you believe it -- ideally counts
-    from a tool result, e.g. "covers 5/6 charges".
-
-    Patterns are saved as `candidate`. They are suggestions for later runs, not
-    licence to auto-apply, and a human can confirm or retire them.
-    """
-    allowed = {"join_key", "transform", "exclusion", "namespace", "tolerance"}
-    if kind not in allowed:
-        return {"error": f"kind must be one of {sorted(allowed)}"}
-    db.execute(
-        "INSERT INTO pattern (kind, name, content, evidence) VALUES (?,?,?,?)"
-        " ON CONFLICT(kind, name) DO UPDATE SET"
-        "   content = excluded.content, evidence = excluded.evidence",
-        (kind, name, content, evidence),
-    )
-    return {"saved": {"kind": kind, "name": name, "status": "candidate"}}
-
-
-def get_patterns(kind: str) -> dict[str, Any]:
-    """Recall previously saved patterns. `kind` filters by type, or pass an
-    empty string for all. Check this before analysing from scratch."""
-    if kind:
-        rows = db.query(
-            "SELECT kind, name, content, status, evidence FROM pattern"
-            " WHERE kind = ? AND status != 'retired' ORDER BY id",
-            (kind,),
-        )
-    else:
-        rows = db.query(
-            "SELECT kind, name, content, status, evidence FROM pattern"
-            " WHERE status != 'retired' ORDER BY id"
-        )
-    return {"patterns": rows}
 
 
 def get_row_history(dataset_id: str, row: int) -> dict[str, Any]:
@@ -335,6 +253,7 @@ def get_row_history(dataset_id: str, row: int) -> dict[str, Any]:
 
 ALL_TOOLS = [
     list_datasets,
+    auto_match_exact,
     trace_record,
     set_spine,
     profile_columns,
@@ -346,7 +265,5 @@ ALL_TOOLS = [
     get_proposal,
     reconciliation_status,
     list_unmatched,
-    save_pattern,
-    get_patterns,
     get_row_history,
 ]

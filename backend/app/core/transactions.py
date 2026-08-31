@@ -29,14 +29,43 @@ OPEN_STATUSES = ("pending", "accepted", "review_later")
 SETTLED = ("exact", "within_tolerance", "high")
 
 
-def _identifier_columns(dataset_id: str, limit: int = 3) -> list[str]:
+def _label_column(dataset_id: str) -> str | None:
+    """The column that names a transaction across sources.
+
+    Not simply the first text column: a source usually carries both its own
+    primary key and the shared reference, and only the shared one identifies the
+    same transaction elsewhere. `internal_payment_id` is unique per row, but
+    `merchant_order_id` is what the processor and bank also carry -- and what a
+    duplicate-payment break has two rows of.
+
+    So pick the column with the widest measured overlap into other datasets.
+    """
+    from app.core import discovery
+
+    name_row = db.query_one("SELECT name FROM dataset WHERE id = ?", (dataset_id,))
+    if not name_row:
+        return None
+    name = name_row["name"]
+
+    best: tuple[float, str] | None = None
+    for pair in discovery.find_join_candidates()["pairs"]:
+        for side in ("left", "right"):
+            if pair[f"{side}_dataset"] != name:
+                continue
+            col = pair[f"{side}_column"]
+            cov = pair[f"{side}_coverage"]
+            if best is None or cov > best[0]:
+                best = (cov, col)
+    if best:
+        return best[1]
+
     cols = db.query(
         "SELECT column_name, inferred_type FROM dataset_column"
         " WHERE dataset_id = ? ORDER BY ordinal",
         (dataset_id,),
     )
     text = [c["column_name"] for c in cols if c["inferred_type"] == "TEXT"]
-    return (text or [c["column_name"] for c in cols])[:limit]
+    return (text or [c["column_name"] for c in cols] or [None])[0]
 
 
 def build(spine_dataset_id: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[str, Any]:
@@ -82,11 +111,11 @@ def build(spine_dataset_id: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> d
     spine_rows = sqlguard.select_all(
         get_settings().db_path, f'SELECT * FROM "{spine_ds["table_name"]}" ORDER BY __row'
     )
-    id_cols = _identifier_columns(spine_dataset_id)
+    label_col = _label_column(spine_dataset_id)
     labels: dict[str, dict[str, Any]] = {}
     for r in spine_rows:
         key = (spine_dataset_id, int(r["__row"]))
-        label = str(r.get(id_cols[0])) if id_cols else f"row {r['__row']}"
+        label = str(r.get(label_col)) if label_col else f"row {r['__row']}"
         spine_label[key] = label
         labels[label] = {"row": int(r["__row"]), "data": r}
 

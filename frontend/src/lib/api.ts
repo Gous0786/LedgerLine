@@ -237,3 +237,21 @@ export interface TransactionsView {
 export function listTransactions() {
   return request<TransactionsView>('/transactions')
 }
+
+// ------------------------------------------------------------- session --
+
+export interface ResetResult {
+  datasets: number
+  proposals: number
+  members: number
+  events: number
+  rules: number
+  tables_dropped: number
+  views_dropped: number
+  files_removed: number
+  agent_sessions_cleared: number
+}
+
+export function resetSession() {
+  return request<ResetResult>('/session/reset', { method: 'POST' })
+}

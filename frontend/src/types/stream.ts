@@ -30,6 +30,8 @@ export interface MetricsData {
   elapsedMs: number
   model: string | null
   agent: string | null
+  /** Model calls in this turn -- an agent turn is many, one per tool round trip. */
+  modelCalls?: number
 }
 
 /** Progress of a reconciliation run. Carries a stable id, so the part is

@@ -1,29 +1,40 @@
 """Which source starts a transaction.
 
-Reconciliation chains have to hang off something. That anchor -- the spine -- is
-whichever source the others reference: orders, not the bank statement, because
-the gateway and ledger both carry `order_id` while nothing carries a gateway id.
+Reconciliation chains hang off an anchor -- the spine -- and the right anchor is
+where a transaction *begins*: the order, not the bank credit that eventually
+settles it.
 
-Inferred from **containment direction**. If A's values are a subset of B's, then
-B is the referenced side and A depends on it; the source that the most others
-depend on, and that depends on fewest itself, is the root.
+**Time decides.** A transaction moves forward through the sources, so the one
+with the earliest events is the origin. This is the signal that generalises:
+orders precede captures, captures precede settlements, and that ordering holds
+whatever the columns happen to be called.
 
-Two exclusions matter, both learned by testing:
+Containment direction (if A's values are a subset of B's, B is referenced) is
+kept only as a fallback, because it answers a different question. It says which
+source is a *lookup*, not which is *first*, and the two diverge: with a payment
+processor referenced by both the ledger and the bank, containment crowns the
+processor even though nothing starts there. It also goes silent whenever two
+sources share a key symmetrically, which is the common case.
 
-*   Only identifier columns count. `expected_payment_date` is a subset of
-    `txn_date` in real data, which is a calendar coincidence, not a key.
-*   Uniqueness and reach are useless as signals -- every table has a unique
-    primary key, and in a fully-joined set every source reaches every other.
-    Neither discriminates.
+Exclusions learned by testing:
+
+*   Only identifier columns count for containment. `expected_payment_date` is a
+    subset of `txn_date` in real data -- a calendar coincidence, not a key.
+*   Uniqueness and reach are useless -- every table has a unique primary key,
+    and in a fully-joined set every source reaches every other.
+*   Only ISO-shaped timestamps are compared, since those sort correctly as
+    text. A DD/MM/YYYY column would rank by day-of-month.
 """
 
 from __future__ import annotations
 
 import collections
 import logging
+import re
 from typing import Any
 
-from app.core import discovery
+from app.config import get_settings
+from app.core import discovery, sqlguard
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -45,8 +56,46 @@ def _identifier_types(dataset_id: str) -> dict[str, str]:
     }
 
 
+_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _earliest_event(dataset_id: str, table_name: str) -> str | None:
+    """Median timestamp of this source, or None if it has no usable one.
+
+    Median rather than minimum: one backdated row should not make a source look
+    like the origin.
+    """
+    cols = db.query(
+        "SELECT column_name FROM dataset_column"
+        " WHERE dataset_id = ? AND inferred_type IN ('DATE','TIMESTAMP')"
+        " ORDER BY ordinal",
+        (dataset_id,),
+    )
+    best: str | None = None
+    for c in cols:
+        col = c["column_name"].replace('"', '""')
+        try:
+            rows = sqlguard.select_all(
+                get_settings().db_path,
+                f'SELECT "{col}" AS v FROM "{table_name}" WHERE "{col}" IS NOT NULL'
+                f' ORDER BY "{col}"'
+                f' LIMIT 1 OFFSET (SELECT COUNT("{col}")/2 FROM "{table_name}")',
+            )
+        except Exception:
+            continue
+        if not rows or rows[0]["v"] is None:
+            continue
+        value = str(rows[0]["v"])
+        if not _ISO.match(value):
+            continue
+        # a source may carry several dates; its position is the earliest of them
+        if best is None or value < best:
+            best = value
+    return best
+
+
 def infer_spine() -> dict[str, Any]:
-    """Rank sources by how many others depend on them."""
+    """Pick the source where transactions begin."""
     datasets = db.query(
         "SELECT id, name FROM dataset WHERE status = 'ready' ORDER BY created_at"
     )
@@ -61,6 +110,14 @@ def infer_spine() -> dict[str, Any]:
             "scores": [],
             "origin": "inferred",
         }
+
+    # --- primary signal: which source's events come first ---
+    timing = {
+        d["id"]: _earliest_event(d["id"], d["table_name"])
+        for d in db.query(
+            "SELECT id, table_name FROM dataset WHERE status = 'ready'"
+        )
+    }
 
     types = {d["name"]: _identifier_types(d["id"]) for d in datasets}
 
@@ -100,6 +157,26 @@ def infer_spine() -> dict[str, Any]:
         }
         for d in datasets
     ]
+    for s_ in scores:
+        s_["earliest_event"] = timing.get(s_["dataset_id"])
+
+    dated = [s_ for s_ in scores if s_["earliest_event"]]
+    if len(dated) >= 2:
+        dated.sort(key=lambda s_: s_["earliest_event"])
+        first = dated[0]
+        return {
+            "dataset_id": first["dataset_id"],
+            "name": first["name"],
+            "reason": (
+                f"earliest events ({first['earliest_event'][:10]}), so transactions"
+                " start here"
+            ),
+            "scores": dated,
+            "foreign_keys": keys,
+            "origin": "inferred",
+        }
+
+    # No comparable timestamps: fall back to who is referenced most.
     scores.sort(key=lambda s: (s["score"], s["referenced_by"]), reverse=True)
     best = scores[0]
 
@@ -120,8 +197,8 @@ def infer_spine() -> dict[str, Any]:
         "dataset_id": best["dataset_id"],
         "name": best["name"],
         "reason": (
-            f"{best['referenced_by']} source(s) reference it, it depends on"
-            f" {best['depends_on']}"
+            f"no comparable timestamps; {best['referenced_by']} source(s)"
+            f" reference it, it depends on {best['depends_on']}"
         ),
         "scores": scores,
         "foreign_keys": keys,

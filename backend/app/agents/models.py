@@ -7,12 +7,15 @@ steps and only the judgement calls need a strong one.
 
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 
 from google.adk.models.lite_llm import LiteLlm
 
 from app.config import get_settings
+
+log = logging.getLogger(__name__)
 
 
 def configure_litellm() -> None:
@@ -27,7 +30,18 @@ def configure_litellm() -> None:
 def model(model_id: str) -> LiteLlm:
     """Wrap an OpenRouter model id (``openrouter/<vendor>/<name>``) for ADK."""
     configure_litellm()
-    return LiteLlm(model=model_id)
+    settings = get_settings()
+
+    extra: dict = {}
+    if settings.enable_prompt_cache:
+        # Ask OpenRouter to report cache hit/write counts. Caching itself does
+        # not currently engage: OpenRouter puts tool schemas after the system
+        # breakpoint, so only the ~420-token system prompt is cacheable, which
+        # is under the provider minimum (2048 on Haiku). Kept because the
+        # accounting is free and shows the moment that changes.
+        extra["extra_body"] = {"usage": {"include": True}}
+
+    return LiteLlm(model=model_id, **extra)
 
 
 def orchestrator_model() -> LiteLlm:

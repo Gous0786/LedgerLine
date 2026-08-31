@@ -22,7 +22,12 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-MAX_ROWS = 50          # rows returned inline to the agent
+# Rows returned inline to the agent. Kept small on purpose: every result stays
+# in the conversation forever and is resent on each subsequent turn, so cost
+# grows with the SQUARE of the number of queries. Fifty wide rows is ~3.9k
+# tokens; seventeen such calls is ~66k of permanent context.
+DEFAULT_ROWS = 10
+MAX_ROWS = 50          # hard ceiling, only on explicit request
 HARD_ROW_CAP = 10_000  # rows we will even read from a cursor
 TIMEOUT_S = 15.0
 
@@ -79,7 +84,7 @@ def select(
     db_path: Path,
     sql: str,
     *,
-    limit: int = MAX_ROWS,
+    limit: int = DEFAULT_ROWS,
     timeout: float = TIMEOUT_S,
 ) -> dict[str, Any]:
     """Run a validated read-only SELECT.

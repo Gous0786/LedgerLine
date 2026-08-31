@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { useDatasets } from '@/state/DatasetsContext'
+import ResetSession from '@/components/ResetSession'
 
 export default function TopBar() {
   const { datasets, activeId, setActiveId, upload, busy } = useDatasets()
@@ -77,6 +78,9 @@ export default function TopBar() {
       >
         {busy ? 'Ingesting…' : '+ CSV'}
       </button>
+
+      <div className="h-4 w-px bg-line" />
+      <ResetSession />
     </header>
   )
 }

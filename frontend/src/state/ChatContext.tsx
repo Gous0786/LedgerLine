@@ -44,6 +44,7 @@ interface ChatContextValue {
   stop: () => void
   metrics: MetricTotals
   resetMetrics: () => void
+  clearChat: () => void
 }
 
 const Ctx = createContext<ChatContextValue | null>(null)
@@ -51,13 +52,14 @@ const Ctx = createContext<ChatContextValue | null>(null)
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [metrics, setMetrics] = useState<MetricTotals>(ZERO)
 
-  const { messages, sendMessage, status, error, stop } = useChat<ReconUIMessage>({
+  const { messages, sendMessage, setMessages, status, error, stop } = useChat<ReconUIMessage>({
     transport: new DefaultChatTransport({ api: '/api/chat' }),
     onData: (part) => {
       if (part.type === 'data-metrics') {
         const d = part.data as MetricsData
         setMetrics((m) => ({
-          calls: m.calls + 1,
+          // One turn is many model calls; count them, not the turns.
+          calls: m.calls + (d.modelCalls ?? 1),
           promptTokens: m.promptTokens + (d.promptTokens ?? 0),
           completionTokens: m.completionTokens + (d.completionTokens ?? 0),
           cachedTokens: m.cachedTokens + (d.cachedTokens ?? 0),
@@ -82,9 +84,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
   const resetMetrics = useCallback(() => setMetrics(ZERO), [])
 
+  // After a session reset the transcript refers to data that no longer exists,
+  // so it has to go along with it.
+  const clearChat = useCallback(() => {
+    setMessages([])
+    setMetrics(ZERO)
+  }, [setMessages])
+
   const value = useMemo<ChatContextValue>(
-    () => ({ messages, status, error, busy, send, stop, metrics, resetMetrics }),
-    [messages, status, error, busy, send, stop, metrics, resetMetrics],
+    () => ({ messages, status, error, busy, send, stop, metrics, resetMetrics, clearChat }),
+    [messages, status, error, busy, send, stop, metrics, resetMetrics, clearChat],
   )
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
+    # The system prompt and tool schemas are byte-identical on every turn and
+    # are re-sent each time. Marking them cacheable turns that repeated cost
+    # into a cache read. Anthropic models honour this reliably; others vary,
+    # and it is inert where unsupported.
+    enable_prompt_cache: bool = True
+
     model_orchestrator: str = "openrouter/stealth/ox-alpha"
     model_worker: str = "openrouter/stealth/ox-alpha"
 

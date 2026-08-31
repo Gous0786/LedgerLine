@@ -168,9 +168,19 @@ def propose_matches(
 
     missing = REQUIRED_COLUMNS - set(raw[0].keys())
     if missing:
+        # The full contract lives here rather than in the tool docstring: a bad
+        # shape always raises, so the agent can learn it at the one moment it
+        # matters instead of re-reading it on every turn.
         raise MatchError(
-            f"query must return columns {sorted(REQUIRED_COLUMNS)};"
-            f" missing {sorted(missing)}"
+            f"missing column(s) {sorted(missing)}. The query must return one row"
+            " per group member with:"
+            "  group_key = identifies the match group (e.g. an invoice or payout id);"
+            "  dataset = the dataset name or id the row comes from;"
+            "  row = that row's __row value;"
+            "  role = optional label such as 'invoice' or 'settlement';"
+            "  amount_minor = optional signed integer in minor units, signed so a"
+            " balancing group sums to zero. A group needs >=2 members spanning"
+            " >=2 datasets."
         )
 
     tolerance_minor = max(0, int(tolerance_minor or 0))

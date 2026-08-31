@@ -33,6 +33,43 @@ from app.streaming import protocol as p
 log = logging.getLogger(__name__)
 
 
+_OPENROUTER_PRICES: dict[str, tuple[float, float]] | None = None
+
+
+def _openrouter_prices() -> dict[str, tuple[float, float]]:
+    """OpenRouter's own price sheet, fetched once per process.
+
+    ADK's usage_metadata carries token counts only -- the cost OpenRouter
+    reports is dropped in the LiteLLM mapping -- and LiteLLM's bundled sheet
+    lags new models, so anything recent prices at zero. Reading the live sheet
+    keeps the meter honest for models LiteLLM has never heard of.
+    """
+    global _OPENROUTER_PRICES
+    if _OPENROUTER_PRICES is not None:
+        return _OPENROUTER_PRICES
+    prices: dict[str, tuple[float, float]] = {}
+    try:
+        import json
+        import urllib.request
+
+        with urllib.request.urlopen(
+            "https://openrouter.ai/api/v1/models", timeout=15
+        ) as fh:
+            for m in json.load(fh).get("data", []):
+                pricing = m.get("pricing") or {}
+                try:
+                    prices[m["id"]] = (
+                        float(pricing.get("prompt") or 0),
+                        float(pricing.get("completion") or 0),
+                    )
+                except (TypeError, ValueError):
+                    continue
+    except Exception:
+        log.debug("could not fetch OpenRouter prices", exc_info=True)
+    _OPENROUTER_PRICES = prices
+    return prices
+
+
 def _cost_usd(candidates: list[str], prompt_tokens: int, completion_tokens: int) -> float:
     """Best effort pricing, first candidate that LiteLLM knows wins.
 
@@ -61,6 +98,17 @@ def _cost_usd(candidates: list[str], prompt_tokens: int, completion_tokens: int)
         except Exception:
             continue
 
+    # LiteLLM did not know it; try OpenRouter's live sheet, which is where the
+    # model actually ran.
+    sheet = _openrouter_prices()
+    for model in candidates:
+        if not model:
+            continue
+        key = model[len("openrouter/"):] if model.startswith("openrouter/") else model
+        rate = sheet.get(key)
+        if rate:
+            return prompt_tokens * rate[0] + completion_tokens * rate[1]
+
     log.debug("no pricing for any of %s", candidates)
     return 0.0
 
@@ -82,6 +130,8 @@ async def translate(
 
     prompt_tokens = 0
     completion_tokens = 0
+    model_calls = 0
+    counted_events: set[str] = set()
     cached_tokens = 0
     reasoning_tokens = 0
     seen_model = model
@@ -104,16 +154,23 @@ async def translate(
                 continue
 
             usage = getattr(event, "usage_metadata", None)
-            if usage is not None:
-                prompt_tokens = getattr(usage, "prompt_token_count", None) or prompt_tokens
-                completion_tokens = (
-                    getattr(usage, "candidates_token_count", None) or completion_tokens
+            # One agent turn makes many model calls -- one per tool round trip --
+            # and each reports its own usage. These must be SUMMED: taking the
+            # latest reports only the final call and hides the true spend, which
+            # is where the cost actually is.
+            event_id = str(getattr(event, "id", "") or "")
+            if usage is not None and event_id not in counted_events:
+                counted_events.add(event_id)
+                model_calls += 1
+                prompt_tokens += getattr(usage, "prompt_token_count", None) or 0
+                completion_tokens += (
+                    getattr(usage, "candidates_token_count", None) or 0
                 )
-                cached_tokens = (
-                    getattr(usage, "cached_content_token_count", None) or cached_tokens
+                cached_tokens += (
+                    getattr(usage, "cached_content_token_count", None) or 0
                 )
-                reasoning_tokens = (
-                    getattr(usage, "thoughts_token_count", None) or reasoning_tokens
+                reasoning_tokens += (
+                    getattr(usage, "thoughts_token_count", None) or 0
                 )
 
             seen_model = getattr(event, "model_version", None) or seen_model
@@ -219,6 +276,7 @@ async def translate(
             elapsed_ms=int((time.perf_counter() - started) * 1000),
             model=seen_model,
             agent=last_author,
+            model_calls=model_calls,
         )
         yield p.finish_step()
         yield p.finish(reason="stop")

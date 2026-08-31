@@ -201,6 +201,7 @@ def metrics(
     elapsed_ms: int = 0,
     model: str | None = None,
     agent: str | None = None,
+    model_calls: int = 1,
     transient: bool = True,
 ) -> dict[str, Any]:
     """Cost / tokens / time. Transient by default -- meter ticks are not history."""
@@ -216,6 +217,9 @@ def metrics(
             "elapsedMs": elapsed_ms,
             "model": model,
             "agent": agent,
+            # An agent turn is many model calls; the panel must show the real
+            # number, not the number of turns.
+            "modelCalls": model_calls,
         },
         transient=transient,
     )
