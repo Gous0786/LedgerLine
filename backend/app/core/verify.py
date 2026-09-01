@@ -33,7 +33,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from app.config import get_settings
-from app.core import sqlguard
+from app.core import sqlguard, timing
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -106,6 +106,7 @@ class Context:
         self.columns: dict[str, list[str]] = {}
         self.currency: dict[str, str | None] = {}
         self._rows: dict[tuple[str, int], dict[str, Any] | None] = {}
+        self._baselines: dict[str, timing.Baseline | None] = {}
 
         for d in db.query("SELECT id, name, table_name FROM dataset"):
             self.tables[d["id"]] = d["table_name"]
@@ -123,6 +124,36 @@ class Context:
 
     def label(self, dataset_id: str, row: int) -> str:
         return f"{self.names.get(dataset_id, dataset_id)}#{row}"
+
+    def baseline(self, rule: str) -> timing.Baseline | None:
+        """What a normal settlement lag looks like for this rule.
+
+        Computed once per rule and held for the batch, because it is a property
+        of the whole population and re-deriving it per proposal would make the
+        check cost more than the matching did.
+        """
+        if rule in self._baselines:
+            return self._baselines[rule]
+
+        members = db.query(
+            "SELECT m.proposal_id, m.dataset_id, m.row FROM match_member m"
+            " JOIN match_proposal p ON p.id = m.proposal_id"
+            " WHERE p.rule = ? AND p.status != 'rejected'",
+            (rule,),
+        )
+        by_proposal: dict[int, list[dict[str, Any]]] = {}
+        for m in members:
+            found = self.row(m["dataset_id"], m["row"])
+            if found is not None:
+                by_proposal.setdefault(m["proposal_id"], []).append(found)
+
+        spans = [
+            s for s in (timing.group_span_seconds(rows) for rows in by_proposal.values())
+            if s is not None
+        ]
+        result = timing.Baseline(spans) if spans else None
+        self._baselines[rule] = result
+        return result
 
     def row(self, dataset_id: str, row: int) -> dict[str, Any] | None:
         key = (dataset_id, int(row))
@@ -363,17 +394,27 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
     # `propose_matches` excludes claimed rows at proposal time, but a human
     # accepting a stale pending proposal later goes through set_status, which
     # checks nothing. This is the gate on that path.
+    # One query for the whole group, not one per member: a batch proposal has
+    # dozens of members, and asking the same question of each turned this into
+    # the single most expensive statement in a reconciliation.
     clashes: list[str] = []
-    for m in members:
+    if members:
+        pairs = " OR ".join(
+            "(mm.dataset_id = ? AND mm.row = ?)" for _ in members
+        )
+        params: list[Any] = []
+        for m in members:
+            params.extend((m["dataset_id"], int(m["row"])))
+        params.extend((edge, proposal_id))
         for o in db.query(
-            "SELECT p.id FROM match_member mm"
+            "SELECT p.id, mm.dataset_id, mm.row FROM match_member mm"
             " JOIN match_proposal p ON p.id = mm.proposal_id"
-            " WHERE mm.dataset_id = ? AND mm.row = ? AND p.status = 'accepted'"
+            f" WHERE ({pairs}) AND p.status = 'accepted'"
             "   AND p.datasets = ? AND p.id != ?",
-            (m["dataset_id"], m["row"], edge, proposal_id),
+            params,
         ):
             clashes.append(
-                f"{ctx.label(m['dataset_id'], m['row'])}"
+                f"{ctx.label(o['dataset_id'], o['row'])}"
                 f" is already accepted in proposal {o['id']}"
             )
     invariants.append(_inv(
@@ -408,7 +449,63 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
             else f"mixed currency: {', '.join(distinct)}",
         ))
 
-    # 8. the stored label must still be what the data says -----------------
+    # 8. did this one take unusually long to settle? -----------------------
+    # A group can tie exactly and still be a finding, and no amount can see it.
+    # The baseline is measured from the rule's own groups -- see core/timing.py
+    # for why there is deliberately no configured settlement window.
+    member_rows = [
+        r for r in (ctx.row(m["dataset_id"], m["row"]) for m in members) if r is not None
+    ]
+    span = timing.group_span_seconds(member_rows)
+    base = ctx.baseline(p["rule"])
+    if base is None or not base.usable or span is None:
+        invariants.append(_inv(
+            "timing_consistent", None,
+            base.describe(span) if base else "no comparable timestamps on this rule",
+        ))
+    else:
+        invariants.append(_inv(
+            "timing_consistent", not base.is_late(span), base.describe(span)
+        ))
+
+    # 9. did the rule leave evidence behind? -------------------------------
+    # A partitioned rule matches one class of row and ignores the rest, so a
+    # refund sitting against a matched order never reaches the group and the
+    # transaction reads as clean. Any row carrying this group's own key that
+    # the rule did not take is unexplained activity attached to a match.
+    leftover: list[str] = []
+    for ds_id in ds_ids:
+        table = ctx.tables.get(ds_id)
+        if not table:
+            continue
+        taken = sorted(int(m["row"]) for m in members if m["dataset_id"] == ds_id)
+        key = str(p["group_key"]).replace("'", "''")
+        matches = [
+            f'"{c}" = \'{key}\'' for c in ctx.columns.get(ds_id, [])
+        ]
+        if not matches:
+            continue
+        exclude = (
+            " AND __row NOT IN (" + ",".join(str(r) for r in taken) + ")" if taken else ""
+        )
+        try:
+            found = sqlguard.select_all(
+                get_settings().db_path,
+                f'SELECT COUNT(*) n FROM "{table}"'
+                f" WHERE ({' OR '.join(matches)}){exclude}",
+            )[0]["n"]
+        except Exception:
+            continue
+        if found:
+            leftover.append(f"{found} unmatched row(s) in {ctx.names.get(ds_id, ds_id)}")
+    invariants.append(_inv(
+        "no_residual_evidence",
+        not leftover,
+        "; ".join(leftover) if leftover
+        else "no rows carrying this key were left out of the group",
+    ))
+
+    # 10. the stored label must still be what the data says ----------------
     recorded_conf = p["confidence"]
     if recorded_conf in ("exact", "within_tolerance", "unbalanced") and residual is not None:
         if residual == 0:

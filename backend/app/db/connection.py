@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,10 +21,30 @@ from typing import Any
 
 _db_path: Path | None = None
 
+# One connection per thread, reused. Opening a connection is not free -- it
+# costs a file open plus four PRAGMA round trips -- and the reconciliation path
+# issues thousands of small queries, so per-call connections dominated the
+# runtime: 6,168 queries took 34 seconds, almost none of it spent querying.
+# Threads are the right scope because FastAPI runs these helpers through
+# `asyncio.to_thread` and sqlite3 objects are not safely shared across threads.
+_local = threading.local()
+
 
 def configure(db_path: Path) -> None:
     global _db_path
     _db_path = db_path
+    _close_local()
+
+
+def _close_local() -> None:
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _local.conn = None
+    _local.path = None
 
 
 def _connect() -> sqlite3.Connection:
@@ -38,14 +59,31 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _connection() -> sqlite3.Connection:
+    """This thread's connection, opened once.
+
+    Keyed on the configured path so a reconfigure -- a session reset, or the
+    eval harness pointing at a sandbox -- retires the old handle instead of
+    quietly reading a database nobody meant to touch.
+    """
+    conn = getattr(_local, "conn", None)
+    if conn is not None and getattr(_local, "path", None) == _db_path:
+        return conn
+    _close_local()
+    conn = _connect()
+    _local.conn = conn
+    _local.path = _db_path
+    return conn
+
+
 @contextmanager
 def cursor():
-    """Synchronous connection scope. Use `run()` from async code."""
-    conn = _connect()
-    try:
-        yield conn
-    finally:
-        conn.close()
+    """Synchronous connection scope. Use `run()` from async code.
+
+    The connection outlives the block; callers that open a transaction are
+    responsible for ending it, as they already were.
+    """
+    yield _connection()
 
 
 def query(sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:

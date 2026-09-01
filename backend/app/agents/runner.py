@@ -25,6 +25,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+from app.agents import callbacks, state
 from app.agents.root_agent import build_root_agent
 from app.config import get_settings
 from app.core import runlog
@@ -80,6 +81,8 @@ async def run(session_id: str, text: str) -> AsyncIterator[Any]:
     await ensure_session(session_id)
     runner = get_runner()
 
+    state.begin_turn()
+    callbacks.begin_turn()
     run_id = runlog.start(title=text, session_id=session_id)
     runlog.event("user-message", {"text": text})
     status, error = "done", None

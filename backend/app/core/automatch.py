@@ -64,13 +64,16 @@ MIN_AMOUNT_ROWS = 3
 UNIQUE_KEY = 0.98
 
 # ...but an absolute threshold alone is wrong, and measurably so. A bank
-# statement that is meant to hold one row per settlement, and holds ten
-# duplicate deposits out of eighty-one rows, scores 0.88 -- read as
-# many-to-many, and the whole edge is declined. The duplicates were the thing
-# being reconciled. So a side can also earn "one" by being mostly unique *and*
-# clearly more unique than the other side, which is what cardinality really is:
-# a relative property, not an absolute one.
-NEARLY_UNIQUE = 0.80
+# statement that is meant to hold one row per settlement, and holds duplicate
+# deposits -- the very defect being reconciled -- scores anywhere from 0.88 down
+# to 0.77 depending on how many. Every absolute cut-off placed here failed on
+# some dataset just below it, because "how many duplicates" is not a constant.
+#
+# So the real test is relative: the `one` side is the one whose key is
+# substantially more distinct than the other's. The floor that remains is
+# meaningful rather than tuned -- more than half its rows carry a key of their
+# own, so calling it the one-per-key side is defensible at all.
+NEARLY_UNIQUE = 0.5
 DOMINANCE = 1.5
 
 # Fraction of a TEXT column's values that must look like numbers before it is
@@ -325,6 +328,9 @@ class Amounts:
     left_expr: str                 # SQL on the alias `l`
     right_expr: str                # SQL on the alias `r`
     agreement: float
+    # How many rows or groups this candidate actually accounted for. Strategies
+    # are chosen on this, never on `agreement` alone.
+    covered: int = 0
     tolerance_minor: int = 0
     partition: tuple[str, str] | None = None
     detail: str = ""
@@ -337,8 +343,12 @@ def _measure(sql: str) -> dict[str, Any] | None:
         return None
 
 
-def _score(row: dict[str, Any] | None) -> tuple[float, int, int] | None:
-    """(agreement, exact groups, tolerance in minor units) from a probe."""
+def _score(row: dict[str, Any] | None) -> tuple[float, int, int, int] | None:
+    """(agreement, exact groups, tolerance, groups explained) from a probe.
+
+    The last element is the one that decides between strategies. Agreement is a
+    ratio, and a ratio is free to be perfect over almost nothing.
+    """
     if not row:
         return None
     n = row["n"] or 0
@@ -350,7 +360,7 @@ def _score(row: dict[str, Any] | None) -> tuple[float, int, int] | None:
         return None
     worst = float(row["worst"] or 0)
     tolerance = math.ceil(round(worst, 4) * 100) if worst > 0 else 0
-    return (agreement, row["exact_n"] or 0, tolerance)
+    return (agreement, row["exact_n"] or 0, tolerance, near)
 
 
 def _probe_row_level(left: Side, right: Side, le: str, re_: str, extra: str = "") -> str:
@@ -374,17 +384,19 @@ def pair_row_level(left: Side, right: Side) -> Amounts | None:
             if scored is None:
                 continue
             # Identical names break ties only; agreement still decides.
-            ranked = (scored[0], scored[1] + (1 if llabel == rlabel else 0), scored[2])
+            ranked = (scored[0], scored[1] + (1 if llabel == rlabel else 0),
+                      scored[2], scored[3])
             if best is None or ranked > best[0]:
                 best = (ranked, llabel, rlabel, le, re_)
     if best is None:
         return None
-    (agreement, _, _), llabel, rlabel, le, re_ = best
+    (agreement, _, _, covered), llabel, rlabel, le, re_ = best
     return Amounts(
         kind="row",
         left_expr=le,
         right_expr=re_,
         agreement=agreement,
+        covered=covered,
         detail=f"amounts {llabel} / {rlabel}",
     )
 
@@ -417,12 +429,13 @@ def pair_aggregate(one: Side, many: Side) -> Amounts | None:
                 best = (scored, olabel, mlabel, oe, me)
     if best is None:
         return None
-    (agreement, _, tolerance), olabel, mlabel, oe, me = best
+    (agreement, _, tolerance, covered), olabel, mlabel, oe, me = best
     return Amounts(
         kind="aggregate",
         left_expr=oe,
         right_expr=me,
         agreement=agreement,
+        covered=covered,
         tolerance_minor=tolerance,
         detail=(
             f"SUM({many.name}.{mlabel}) = {one.name}.{olabel}"
@@ -460,18 +473,19 @@ def pair_partitioned(one: Side, many: Side) -> Amounts | None:
                     # ranking on agreement picks the partition that covers
                     # almost nothing. Agreement is the floor `_score` already
                     # enforced; coverage is what decides between survivors.
-                    ranked = (scored[1], scored[0], scored[2])
+                    ranked = (scored[3], scored[0], scored[2])
                     if best is None or ranked > best[0]:
                         best = (ranked, olabel, mlabel, pcol, str(value), oe, me)
     if best is None:
         return None
     # best[0] is ranked (rows explained, agreement, tolerance) -- see above.
-    (_covered, agreement, _), olabel, mlabel, pcol, value, oe, me = best
+    (covered, agreement, _), olabel, mlabel, pcol, value, oe, me = best
     return Amounts(
         kind="partitioned",
         left_expr=oe,
         right_expr=me,
         agreement=agreement,
+        covered=covered,
         partition=(pcol, value),
         detail=(
             f"{one.name}.{olabel} = {many.name}.{mlabel}"
@@ -618,9 +632,13 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
             assert one is not None and many is not None
             aggregate = pair_aggregate(one, many)
             partitioned = pair_partitioned(one, many)
+            # Coverage decides, not agreement -- the same lesson as inside
+            # `pair_partitioned`, one level up. A partition on a single refund
+            # type ties perfectly across four rows and would otherwise beat an
+            # aggregate that correctly explains ninety.
             amounts = max(
                 (a for a in (aggregate, partitioned) if a),
-                key=lambda a: a.agreement,
+                key=lambda a: (a.covered, a.agreement),
                 default=None,
             )
             if amounts is None:
@@ -680,7 +698,16 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
         "rules_run": len(results),
         "groups_proposed": total,
         "results": results,
-        "next": "Use reconciliation_status and list_unmatched to work the remainder.",
+        # Coverage and leftovers come back in the same result on purpose.
+        # Measured on a real turn, the agent followed this call with
+        # reconciliation_status, list_unmatched, list_proposals, get_proposal
+        # and five run_sql probes -- eight round trips to learn what this
+        # function already knew. Each round trip is paid again in every later
+        # call's history, so answering here is the single largest saving
+        # available.
+        "coverage": matching.reconciliation_status(),
+        "next": "Everything above is current. Work the `declined` edges and the"
+                " unmatched examples in `coverage`; do not re-fetch them.",
     }
     if normalised:
         out["normalised_views"] = normalised

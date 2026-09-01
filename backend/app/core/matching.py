@@ -167,6 +167,7 @@ def release(
     reason: str,
     kind: str = "accepted",
     ctx: verify.Context | None = None,
+    verified: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The single door to `accepted`.
 
@@ -176,7 +177,7 @@ def release(
     proposal rather than raised -- a blocked release is a finding, and the
     reviewer needs to see why.
     """
-    result = verify.gate(proposal_id, ctx)
+    result = verified or verify.gate(proposal_id, ctx)
     if result["status"] != verify.PASS:
         db.execute(
             "INSERT INTO match_event (proposal_id, kind, actor, detail)"
@@ -311,6 +312,7 @@ def propose_matches(
         "auto_accepted": 0,
         "pending": 0,
         "blocked_by_verification": 0,
+        "flagged_by_verification": 0,
         "skipped_already_matched": 0,
         "skipped_duplicate": 0,
         "skipped_single_member": 0,
@@ -319,9 +321,9 @@ def propose_matches(
     sample: list[dict[str, Any]] = []
     residual_absorbed = 0   # signed sum of what tolerance let through
     blocked: list[dict[str, Any]] = []
-    # Built on first use: a rule with nothing to auto-accept should not pay for
-    # the metadata scan.
-    verify_ctx: verify.Context | None = None
+    # Groups are created first and verified afterwards -- see the second pass
+    # below for why that ordering is load-bearing.
+    created: list[dict[str, Any]] = []
 
     for key, members in collapsed.items():
         if key in seen_keys:
@@ -399,36 +401,14 @@ def propose_matches(
                 conn.execute("ROLLBACK")
                 raise
 
-        status = "pending"
-        if eligible:
-            verify_ctx = verify_ctx or verify.Context()
-            outcome = release(
-                pid, actor="system",
-                reason=f"{confidence}, and rule {rule!r} previously approved",
-                kind="auto_accepted", ctx=verify_ctx,
-            )
-            if outcome["released"]:
-                status = "accepted"
-            else:
-                counts["blocked_by_verification"] += 1
-                if len(blocked) < 10:
-                    blocked.append({
-                        "proposal_id": pid,
-                        "group_key": key,
-                        "failures": outcome["verification"]["failures"],
-                    })
-
+        created.append({
+            "pid": pid, "key": key, "confidence": confidence,
+            "eligible": eligible, "members": members, "edge": edge,
+        })
         counts["proposed"] += 1
         by_confidence[confidence] = by_confidence.get(confidence, 0) + 1
         if confidence == WITHIN_TOLERANCE and balance:
             residual_absorbed += balance
-        if status == "accepted":
-            counts["auto_accepted"] += 1
-            claimed.setdefault(edge, set()).update(
-                (m["dataset_id"], m["row"]) for m in members
-            )
-        else:
-            counts["pending"] += 1
 
         if len(sample) < 12:
             sample.append(
@@ -440,6 +420,48 @@ def propose_matches(
                     "balance_minor": balance,
                 }
             )
+
+    # --- verify, then release -------------------------------------------
+    # A second pass, deliberately, because two of the checks are properties of
+    # the *population* rather than of one group: whether a settlement lag is
+    # unusual only means something against the other lags this rule produced.
+    # Verifying inside the creation loop asked that question of the first
+    # proposal when one group existed, cached the answer, and never found a
+    # late settlement again.
+    #
+    # It also verifies everything, not just what is up for release. A pending
+    # queue of `exact` matches with no sign that some are mixed-currency or
+    # late is the queue a reviewer is about to work through.
+    verify_ctx = verify.Context()
+    for item in created:
+        pid, key = item["pid"], item["key"]
+        checked = verify.verify_proposal(pid, verify_ctx)
+        released = False
+        if item["eligible"]:
+            outcome = release(
+                pid, actor="system",
+                reason=f"{item['confidence']}, and rule {rule!r} previously approved",
+                kind="auto_accepted", ctx=verify_ctx, verified=checked,
+            )
+            released = outcome["released"]
+            if not released:
+                counts["blocked_by_verification"] += 1
+                if len(blocked) < 10:
+                    blocked.append({"proposal_id": pid, "group_key": key,
+                                    "failures": checked["failures"]})
+        elif checked["status"] != verify.PASS:
+            counts["flagged_by_verification"] += 1
+            if len(blocked) < 10:
+                blocked.append({"proposal_id": pid, "group_key": key,
+                                "failures": checked["failures"]})
+
+        if released:
+            counts["auto_accepted"] += 1
+            claimed.setdefault(item["edge"], set()).update(
+                (m["dataset_id"], m["row"]) for m in item["members"]
+            )
+        else:
+            counts["pending"] += 1
 
     created_keys = [g["group_key"] for g in sample]
     return {

@@ -20,6 +20,7 @@ written before the lesson.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 from typing import Any
@@ -27,6 +28,36 @@ from typing import Any
 from app.core import pricing, runlog
 
 log = logging.getLogger(__name__)
+
+# How many *exploratory* calls one turn may make. Not a cost cap for its own
+# sake -- a bound on variance, which is what makes the cost unquotable. The
+# same prompt on the same data has spent 9 calls and 14, 43k tokens and 79k,
+# because "reconcile it" has no natural end and the model keeps probing after
+# the deterministic pass has already answered. The prompt asks it not to; two
+# measured runs show it does anyway, which is the same reason confidence is
+# computed here rather than requested from the model.
+#
+# Generous on purpose: auto_match_exact now returns coverage and leftovers in
+# one result, so what remains is a handful of questions about specific breaks.
+EXPLORE_BUDGET = 6
+
+# Tools that look. The ones that *do* something -- auto_match_exact,
+# propose_matches, create_view, set_spine, verify_match -- are never budgeted,
+# because running out of budget must never mean leaving the job half done.
+EXPLORATORY = frozenset({
+    "run_sql", "profile_columns", "trace_record", "list_datasets",
+    "find_join_candidates", "list_proposals", "get_proposal",
+    "list_unmatched", "reconciliation_status", "get_row_history",
+})
+
+_explored: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "recon_explore_calls", default=0
+)
+
+
+def begin_turn() -> None:
+    """Reset the per-turn exploration budget."""
+    _explored.set(0)
 
 # ~1.5k tokens. Chosen against measured results: the two heaviest tools
 # (find_join_candidates, list_proposals) came in around 7.5k characters, and
@@ -98,9 +129,20 @@ def cap_result(payload: Any) -> tuple[Any, dict[str, int] | None]:
 
 
 def after_tool(
-    tool: Any, args: dict[str, Any], ctx: Any, tool_response: dict[str, Any]
+    *,
+    tool: Any,
+    args: dict[str, Any],
+    tool_context: Any,
+    tool_response: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Record the call, then cap what goes back to the model."""
+    """Record the call, then cap what goes back to the model.
+
+    Keyword-only, and the names are ADK's. Its own source notes that the
+    callback type aliases are declared positionally but the framework has
+    always invoked them by keyword, so a signature that merely has the right
+    arity fails at the first tool call with a TypeError -- which is exactly how
+    this was found.
+    """
     name = getattr(tool, "name", None) or getattr(tool, "__name__", "tool")
     capped, dropped = cap_result(tool_response)
 
@@ -117,7 +159,7 @@ def after_tool(
             # actually said, not what fitted.
             "result": tool_response,
         },
-        agent=getattr(ctx, "agent_name", None),
+        agent=getattr(tool_context, "agent_name", None),
     )
 
     if dropped:
@@ -127,12 +169,46 @@ def after_tool(
     return None  # unchanged
 
 
-def before_model(ctx: Any, llm_request: Any) -> None:
+def before_tool(
+    *, tool: Any, args: dict[str, Any], tool_context: Any
+) -> dict[str, Any] | None:
+    """Spend the exploration budget, and say so when it runs out.
+
+    Returning a dict short-circuits the tool, so this is a real bound rather
+    than advice. The message is written to be *actionable* -- it tells the model
+    to answer with what it has, because a refusal it cannot act on just becomes
+    another wasted round trip.
+    """
+    name = getattr(tool, "name", None) or getattr(tool, "__name__", "tool")
+    if name not in EXPLORATORY:
+        return None
+
+    spent = _explored.get() + 1
+    _explored.set(spent)
+    if spent <= EXPLORE_BUDGET:
+        return None
+
+    log.info("exploration budget spent; refused %s", name)
+    runlog.event("tool-budget-exceeded", {"tool": name, "args": args, "spent": spent})
+    return {
+        "error": "exploration budget for this turn is spent",
+        "spent": spent,
+        "budget": EXPLORE_BUDGET,
+        "note": (
+            "Stop investigating and answer now with what you already have."
+            " auto_match_exact's result already carries coverage and the"
+            " unmatched examples. Reporting what is unresolved is a complete"
+            " answer; it does not need to be explained row by row."
+        ),
+    }
+
+
+def before_model(*, callback_context: Any, llm_request: Any) -> None:
     runlog.model_call_started()
     return None
 
 
-def after_model(ctx: Any, llm_response: Any) -> None:
+def after_model(*, callback_context: Any, llm_response: Any) -> None:
     """One `run_metric` row per completed model call.
 
     Streaming delivers many partial responses and one final; only the final
@@ -153,7 +229,7 @@ def after_model(ctx: Any, llm_response: Any) -> None:
 
     runlog.metric(
         model=model,
-        agent=getattr(ctx, "agent_name", None),
+        agent=getattr(callback_context, "agent_name", None),
         prompt_tokens=prompt,
         completion_tokens=completion,
         cached_tokens=getattr(usage, "cached_content_token_count", None) or 0,

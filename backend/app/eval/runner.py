@@ -49,6 +49,8 @@ class RunResult:
     verification: dict[str, Any]
     datasets: list[dict[str, Any]]
     matched_unlabelled: set[str] = field(default_factory=set)
+    # Present only for an --agent run; the deterministic path has no turn.
+    agent: Any = None
 
 
 class _Sandbox:
@@ -135,6 +137,19 @@ def _collect_verdicts(work_keys: set[str]) -> dict[str, Verdict]:
     for r in rows:
         grouped.setdefault(str(r["group_key"]), []).append(r)
 
+    # Read once, not once per work key -- and only the *latest* verdict per
+    # proposal. A proposal is verified when it is created and again if someone
+    # tries to release it, so an early failure that a later pass cleared must
+    # not keep counting against it.
+    blocked = {
+        r["proposal_id"] for r in db.query(
+            "SELECT v.proposal_id FROM verification v"
+            " WHERE v.id = (SELECT MAX(v2.id) FROM verification v2"
+            "               WHERE v2.proposal_id = v.proposal_id)"
+            "   AND v.status = 'fail'"
+        )
+    }
+
     verdicts: dict[str, Verdict] = {}
     for key in work_keys:
         props = grouped.get(key, [])
@@ -147,11 +162,6 @@ def _collect_verdicts(work_keys: set[str]) -> dict[str, Verdict]:
         # a mixed-currency group, say -- which is an exception in every sense
         # that matters to a reviewer, and scoring it as a match would credit
         # the system for a mistake its own gate caught.
-        blocked = {
-            r["proposal_id"] for r in db.query(
-                "SELECT DISTINCT proposal_id FROM verification WHERE status = 'fail'"
-            )
-        }
         confidences = [p["confidence"] for p in props]
         if any(p["status"] != "accepted" and p["id"] in blocked for p in props):
             state = EXCEPTION

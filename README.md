@@ -31,6 +31,15 @@ no amount can verify, and those read as progress while explaining nothing.
 Split credit/debit columns are republished as one signed column in a `v_*_norm`
 view first, so a statement has something comparable at all.
 
+**No configured windows, rates or policies.** A batch can tie to the penny and
+still be late, but "three days" is a fact about one processor's contract, not
+about reconciliation, and there is no constant that is right for the next
+dataset. So the normal settlement lag is measured from the rule's own groups and
+outliers are flagged against that. The first version used a Tukey fence and
+failed silently once a third of a dataset was late — a tail test breaks down when
+the tail gets big — so the split is found where the distribution actually
+separates. See `core/timing.py`.
+
 **Nothing is accepted on its own say-so.** Confidence is computed from the numbers
 the matching SQL returned, so it cannot notice those numbers being wrong — a
 truncating `CAST`, or a `COALESCE(col, 0)` that turns a missing amount into a

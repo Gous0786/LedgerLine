@@ -17,8 +17,9 @@ import logging
 import sys
 from pathlib import Path
 
+from app.eval import agent_runner, runner
 from app.eval import fixture as fixture_mod
-from app.eval import runner
+from app.eval import profile as profile_mod
 from app.eval import score as score_mod
 from app.eval.fixture import EXCEPTION, MATCHED, MISSING
 
@@ -59,7 +60,11 @@ def _report(result: runner.RunResult, scores: dict[str, score_mod.Scores]) -> No
     v = result.verification
     print(f"\nVERIFIER   {v.get('passed', 0)}/{v.get('verified', 0)} passed,"
           f" {v.get('failed', 0)} failed")
+    _scores_report(result, scores)
 
+
+def _scores_report(result: runner.RunResult,
+                   scores: dict[str, score_mod.Scores]) -> None:
     for name in ("ALL", *[k for k in scores if k != "ALL"]):
         s = scores[name]
         print(f"\n{'=' * 62}\nSCOPE {name}   ({s.total} labelled)")
@@ -103,6 +108,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="fail (exit 1) if the false auto-match rate exceeds this")
     parser.add_argument("--min-recall", type=float, default=None,
                         help="fail (exit 1) if MATCHED recall falls below this")
+    parser.add_argument("--agent", action="store_true",
+                        help="drive the real agent turn instead of the deterministic"
+                             " pass (needs OPENROUTER_API_KEY; costs money)")
+    parser.add_argument("--prompt", default=agent_runner.DEFAULT_PROMPT,
+                        help="the turn to send in --agent mode")
+    parser.add_argument("--profile", action="store_true",
+                        help="count database work and report repeated query shapes")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -117,13 +129,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    result = runner.run(fx)
+    def _go():
+        return agent_runner.run(fx, args.prompt) if args.agent else runner.run(fx)
+
+    try:
+        if args.profile:
+            with profile_mod.profiling() as prof:
+                result = _go()
+        else:
+            prof = None
+            result = _go()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     scores = score_mod.score_all(result)
 
     if args.json:
         print(json.dumps(score_mod.as_dict(result, scores), indent=2, default=str))
     else:
         _report(result, scores)
+        if result.agent is not None:
+            agent_runner.report(result.agent)
+        if prof is not None:
+            profile_mod.report(prof)
 
     overall = scores["ALL"]
     failed = False

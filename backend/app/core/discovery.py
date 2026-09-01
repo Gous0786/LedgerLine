@@ -154,9 +154,6 @@ def find_join_candidates(dataset_ids: list[str] | None = None) -> dict[str, Any]
             values = _distinct_values(ds["table_name"], col["column_name"])
             if len(values) < MIN_DISTINCT:
                 continue
-            # enum-like columns overlap with everything and mean nothing
-            if len(values) <= ENUM_MAX_DISTINCT and (ds["row_count"] or 0) > len(values) * 2:
-                continue
             loaded.append(
                 {
                     "dataset_id": ds["id"],
@@ -164,6 +161,14 @@ def find_join_candidates(dataset_ids: list[str] | None = None) -> dict[str, Any]
                     "column": col["column_name"],
                     "type": col["inferred_type"],
                     "values": values,
+                    # Few distinct values, repeated across many rows. On its own
+                    # this says nothing: `status` looks like this and so does a
+                    # foreign key into a small parent table. Which one it is
+                    # depends on the other side -- see below.
+                    "repetitive": (
+                        len(values) <= ENUM_MAX_DISTINCT
+                        and (ds["row_count"] or 0) > len(values) * 2
+                    ),
                 }
             )
 
@@ -171,6 +176,15 @@ def find_join_candidates(dataset_ids: list[str] | None = None) -> dict[str, Any]
     for i, left in enumerate(loaded):
         for right in loaded[i + 1 :]:
             if left["dataset_id"] == right["dataset_id"]:
+                continue
+            # Being enum-like is a property of the *pair*, not of a column.
+            # `settlement_batch_id` on a processor table is seven values across
+            # a hundred rows -- indistinguishable from a status column until you
+            # look at the other side, where those same seven values are one row
+            # each. That is a foreign key into a small parent, and dropping it
+            # loses the entire settlement edge. Only a pair that repeats on
+            # *both* sides is an enum.
+            if left["repetitive"] and right["repetitive"]:
                 continue
             shared = left["values"] & right["values"]
             if not shared:
