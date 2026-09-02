@@ -33,7 +33,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from app.config import get_settings
-from app.core import sqlguard, timing
+from app.core import duplicates, sqlguard, timing
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -260,10 +260,17 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
         raise VerifyError(f"no proposal {proposal_id}")
 
     members = db.query(
-        "SELECT dataset_id, row, role, amount_minor FROM match_member"
+        "SELECT dataset_id, row, role, amount_minor, duplicate_of FROM match_member"
         " WHERE proposal_id = ? ORDER BY dataset_id, row",
         (proposal_id,),
     )
+    # A member flagged as duplicating another row of the same source keeps its
+    # recorded amount so a reviewer can see what the duplicated line claims,
+    # but it was excluded from the group's sum when the group was built. The
+    # verifier has to use the same rule or it re-adds the amount and rejects
+    # every batch the exclusion just corrected.
+    counted = [m for m in members if duplicates.counts_toward_balance(m)]
+    duplicated = [m for m in members if m["duplicate_of"] is not None]
     tolerance = int(p["tolerance_minor"] or 0)
     invariants: list[dict[str, Any]] = []
 
@@ -309,7 +316,7 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
     traces: list[dict[str, Any]] = []
     untraceable: list[str] = []
     amounts_present = 0
-    for m in members:
+    for m in counted:
         label = ctx.label(m["dataset_id"], m["row"])
         if m["amount_minor"] is None:
             traces.append({"member": label, "how": "no amount recorded", "expr": None})
@@ -348,7 +355,7 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
     if amounts_present and not untraceable:
         residual = int(sum(
             Decimal(int(m["amount_minor"]))
-            for m in members if m["amount_minor"] is not None
+            for m in counted if m["amount_minor"] is not None
         ))
         within = abs(residual) <= tolerance
         # Only a proposal that *claims* to tie can fail this. One recorded
@@ -466,6 +473,21 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
     else:
         invariants.append(_inv(
             "timing_consistent", not base.is_late(span), base.describe(span)
+        ))
+
+    # 8b. duplicated source rows, reported rather than judged --------------
+    if duplicated:
+        named = ", ".join(
+            f"{ctx.label(m['dataset_id'], m['row'])} duplicates row {m['duplicate_of']}"
+            for m in duplicated[:4]
+        )
+        invariants.append(_inv(
+            "duplicate_rows_excluded", None,
+            f"{len(duplicated)} member(s) duplicate another row of the same"
+            f" source: {named}"
+            + ("; excluded from the sum"
+               if duplicates.EXCLUDE_DUPLICATE_AMOUNTS
+               else "; still counted, so the group's residual reflects them"),
         ))
 
     # 9. did the rule leave evidence behind? -------------------------------

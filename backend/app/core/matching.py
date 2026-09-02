@@ -27,7 +27,7 @@ import logging
 from typing import Any
 
 from app.config import get_settings
-from app.core import runlog, sqlguard, verify
+from app.core import duplicates, runlog, sqlguard, verify
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ UNBALANCED = "unbalanced"
 # only as safe as the rule that set it, so within-tolerance rides on the same
 # approval gate as exact rather than getting a free pass.
 AUTO_ACCEPTABLE = (EXACT, WITHIN_TOLERANCE)
+
 
 
 class MatchError(Exception):
@@ -262,6 +263,8 @@ def propose_matches(
 
     lookup = _dataset_lookup()
     claimed = _claimed_rows()
+    # One scan per dataset, reused across every group this rule produces.
+    redundant: dict[str, dict[int, int]] = {}
     seen_keys = _existing_group_keys(rule)
 
     # --- assemble groups -------------------------------------------------
@@ -277,6 +280,8 @@ def propose_matches(
         # A join that fans out (many gateway rows against one bank row) repeats
         # that bank row per match. It is one member either way -- collapsing it
         # avoids both a PK violation and, worse, double-counting its amount.
+        if ds_id not in redundant:
+            redundant[ds_id] = duplicates.redundant_rows(ds_id)
         member_key = (ds_id, int(r["row"]))
         bucket = groups.setdefault(key, {})
         if member_key not in bucket:
@@ -313,6 +318,7 @@ def propose_matches(
         "pending": 0,
         "blocked_by_verification": 0,
         "flagged_by_verification": 0,
+        "duplicate_members_flagged": 0,
         "skipped_already_matched": 0,
         "skipped_duplicate": 0,
         "skipped_single_member": 0,
@@ -339,8 +345,24 @@ def propose_matches(
         if any((m["dataset_id"], m["row"]) in claimed.get(edge, ()) for m in members):
             counts["skipped_already_matched"] += 1
             continue
-        amounts = [m["amount_minor"] for m in members]
-        has_amounts = all(a is not None for a in amounts)
+
+        # --- a row the source file recorded twice --------------------------
+        # Always marked, so the reviewer sees two rows as one event recorded
+        # twice rather than comparing them by eye. Whether the amount still
+        # counts is `core/duplicates` policy -- see the flag there for why the
+        # default leaves the break standing.
+        for m in members:
+            canonical = redundant.get(m["dataset_id"], {}).get(m["row"])
+            if canonical is not None and any(
+                o["row"] == canonical and o["dataset_id"] == m["dataset_id"]
+                for o in members
+            ):
+                m["duplicate_of"] = canonical
+                counts["duplicate_members_flagged"] += 1
+
+        counted = [m for m in members if duplicates.counts_toward_balance(m)]
+        amounts = [m["amount_minor"] for m in counted]
+        has_amounts = bool(amounts) and all(a is not None for a in amounts)
         balance = int(sum(int(a) for a in amounts)) if has_amounts else None
 
         if any((m["dataset_id"], m["row"]) in contested for m in members):
@@ -384,10 +406,12 @@ def propose_matches(
                 pid = cur.lastrowid
                 conn.executemany(
                     "INSERT INTO match_member"
-                    " (proposal_id, dataset_id, row, role, amount_minor)"
-                    " VALUES (?,?,?,?,?)",
+                    " (proposal_id, dataset_id, row, role, amount_minor,"
+                    "  duplicate_of)"
+                    " VALUES (?,?,?,?,?,?)",
                     [
-                        (pid, m["dataset_id"], m["row"], m["role"], m["amount_minor"])
+                        (pid, m["dataset_id"], m["row"], m["role"],
+                         m["amount_minor"], m.get("duplicate_of"))
                         for m in members
                     ],
                 )
@@ -507,7 +531,8 @@ def get_proposal(proposal_id: int) -> dict[str, Any]:
         raise MatchError(f"no proposal {proposal_id}")
 
     members = db.query(
-        "SELECT m.dataset_id, d.name AS dataset, m.row, m.role, m.amount_minor"
+        "SELECT m.dataset_id, d.name AS dataset, m.row, m.role, m.amount_minor,"
+        " m.duplicate_of"
         " FROM match_member m JOIN dataset d ON d.id = m.dataset_id"
         " WHERE m.proposal_id = ? ORDER BY d.name, m.row",
         (proposal_id,),
@@ -527,7 +552,42 @@ def get_proposal(proposal_id: int) -> dict[str, Any]:
         " WHERE proposal_id = ? ORDER BY id",
         (proposal_id,),
     )
-    return {**p, "members": members, "events": events}
+    return {**p, "members": members, "events": events,
+            "duplicates": _duplicate_note(p, members)}
+
+
+def _duplicate_note(
+    proposal: dict[str, Any], members: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Why this group does not tie, when a duplicated row is the reason.
+
+    Computed here rather than in the UI, for the same reason every other figure
+    is: the interface should render a number, not derive one. When the residual
+    matches the duplicated amount exactly, that is the whole explanation, and
+    saying so turns "off by 268.68, go and find out why" into an answer.
+    """
+    duplicated = [m for m in members if m.get("duplicate_of") is not None]
+    if not duplicated:
+        return None
+
+    amount = sum(int(m["amount_minor"] or 0) for m in duplicated)
+    balance = proposal.get("balance_minor")
+    without = (int(balance) - amount) if balance is not None else None
+    tolerance = int(proposal.get("tolerance_minor") or 0)
+    explains = without is not None and abs(without) <= tolerance
+
+    return {
+        "members": len(duplicated),
+        "amount_minor": amount,
+        "balance_without_duplicates_minor": without,
+        "explains_residual": explains,
+        "counted": duplicates.EXCLUDE_DUPLICATE_AMOUNTS is False,
+        "rows": [
+            {"dataset": m["dataset"], "row": m["row"],
+             "duplicate_of": m["duplicate_of"], "amount_minor": m["amount_minor"]}
+            for m in duplicated
+        ],
+    }
 
 
 def _identifying_columns(dataset_id: str, limit: int = 3) -> list[str]:

@@ -121,6 +121,9 @@ export interface ProposalMember {
   row: number
   role: string | null
   amount_minor: number | null
+  /** __row of the row this one duplicates, byte for byte. Null for ordinary
+   *  members. Its amount is shown but was left out of the group's sum. */
+  duplicate_of: number | null
   data: Record<string, unknown> | null
 }
 
@@ -134,6 +137,25 @@ export interface ProposalEvent {
 export interface ProposalDetail extends Proposal {
   members: ProposalMember[]
   events: ProposalEvent[]
+  /** Present only when a member duplicates another row of the same source. */
+  duplicates: ProposalDuplicates | null
+}
+
+export interface ProposalDuplicates {
+  members: number
+  amount_minor: number
+  /** What the group would sum to if the duplicated rows were discounted. */
+  balance_without_duplicates_minor: number | null
+  /** True when discounting them alone brings the group to zero. */
+  explains_residual: boolean
+  /** True when their amounts still count toward the balance shown. */
+  counted: boolean
+  rows: {
+    dataset: string
+    row: number
+    duplicate_of: number
+    amount_minor: number | null
+  }[]
 }
 
 export interface ProposalSummary {

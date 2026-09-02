@@ -45,6 +45,19 @@ class AgentTelemetry:
     answer: str = ""
     run_id: str | None = None
     per_call_prompt_tokens: list[int] = field(default_factory=list)
+    budget_refusals: int = 0
+
+    @property
+    def failed(self) -> bool:
+        """The turn never reached the model.
+
+        Worth its own flag because the failure mode is silent and looks exactly
+        like incompetence: a turn that dies before the first call leaves an
+        empty database, and scoring that produces a confident 6.6% accuracy for
+        a system that was never asked anything. A provider timeout must not be
+        reportable as a quality regression.
+        """
+        return self.model_calls == 0
 
 
 async def _drive(prompt: str, telemetry: AgentTelemetry) -> None:
@@ -94,6 +107,13 @@ def _read_telemetry(telemetry: AgentTelemetry) -> None:
     )
     telemetry.tool_result_chars = sum(r["produced"] or 0 for r in sizes)
     telemetry.tool_sent_chars = sum(r["sent"] or 0 for r in sizes)
+
+    refused = db.query_one(
+        "SELECT COUNT(*) n FROM run_event"
+        " WHERE run_id = ? AND kind = 'tool-budget-exceeded'",
+        (run["id"],),
+    )
+    telemetry.budget_refusals = (refused or {}).get("n", 0) or 0
 
 
 def run(fixture: Fixture, prompt: str = DEFAULT_PROMPT) -> RunResult:
@@ -149,6 +169,15 @@ def run(fixture: Fixture, prompt: str = DEFAULT_PROMPT) -> RunResult:
 
 
 def report(telemetry: AgentTelemetry) -> None:
+    if telemetry.failed:
+        print(f"\n{'=' * 62}\nAGENT TURN FAILED   {telemetry.prompt!r}")
+        print(f"  wall clock     {telemetry.wall_seconds:.1f}s")
+        print("  model calls    0 -- the turn never reached the model, so the"
+              " scores above are meaningless")
+        for err in telemetry.errors or ["no error was reported"]:
+            print(f"  error          {err}")
+        return
+
     print(f"\n{'=' * 62}\nAGENT TURN   {telemetry.prompt!r}")
     print(f"  wall clock     {telemetry.wall_seconds:.1f}s"
           f"   run {telemetry.run_id}")
@@ -164,6 +193,9 @@ def report(telemetry: AgentTelemetry) -> None:
         counts[name] = counts.get(name, 0) + 1
     for name, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         print(f"      {n:>3}x  {name}")
+    if telemetry.budget_refusals:
+        print(f"  budget refusals {telemetry.budget_refusals}"
+              f"  (calls the guard blocked -- each still cost a round trip)")
     print(f"  tool bytes     {telemetry.tool_result_chars:,} produced,"
           f" {telemetry.tool_sent_chars:,} sent to the model")
     if telemetry.per_call_prompt_tokens:

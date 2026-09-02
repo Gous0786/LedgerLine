@@ -144,6 +144,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     scores = score_mod.score_all(result)
 
+    # A turn that never reached the model produced an empty database, and
+    # scoring that says nothing about the system. Refuse rather than publish a
+    # number that looks like a regression.
+    if result.agent is not None and result.agent.failed:
+        agent_runner.report(result.agent)
+        print("\nFAIL the agent turn did not run; no score was produced",
+              file=sys.stderr)
+        return 3
+
     if args.json:
         print(json.dumps(score_mod.as_dict(result, scores), indent=2, default=str))
     else:

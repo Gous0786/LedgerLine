@@ -689,6 +689,8 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
             "proposed": outcome.get("proposed", 0),
             "by_confidence": outcome.get("by_confidence", {}),
             "skipped_already_matched": outcome.get("skipped_already_matched", 0),
+            **({"duplicate_members_flagged": outcome["duplicate_members_flagged"]}
+               if outcome.get("duplicate_members_flagged") else {}),
             **({"blocked_by_verification": outcome["blocked_by_verification"]}
                if outcome.get("blocked_by_verification") else {}),
         })

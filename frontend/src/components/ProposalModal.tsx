@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
+  type ProposalDuplicates,
   formatMinor,
   getProposal,
   type Confidence,
@@ -26,6 +27,51 @@ const CONFIDENCE_WHY: Record<Confidence, string> = {
 }
 
 /** Renders one source row, highlighting the fields that carry the match. */
+function DuplicateNote({ duplicates }: { duplicates: ProposalDuplicates }) {
+  const { rows, amount_minor, balance_without_duplicates_minor, explains_residual } =
+    duplicates
+  const list = rows
+    .map((r) => `${r.dataset} row ${r.row} repeats row ${r.duplicate_of}`)
+    .join('; ')
+
+  return (
+    <div className="rounded-lg border border-warn/40 bg-warn/5 px-3 py-2.5">
+      <div className="mb-1 flex items-baseline gap-2">
+        <span className="pill border-warn/40 bg-warn/10 text-[10px] text-warn">
+          duplicate rows
+        </span>
+        <span className="font-mono text-[11px] text-faint">
+          {duplicates.members} of {rows.length === 1 ? 'this group' : 'these'} counted twice
+        </span>
+      </div>
+      <p className="text-[12px] leading-relaxed text-muted">
+        {list}. The source file records the same row twice, so its{' '}
+        <span className="font-mono text-warn">{formatMinor(amount_minor)}</span> is in
+        the total twice.{' '}
+        {explains_residual ? (
+          <>
+            That is the entire difference — discount it and the group balances to{' '}
+            <span className="font-mono text-ok">
+              {formatMinor(balance_without_duplicates_minor)}
+            </span>
+            .
+          </>
+        ) : (
+          <>
+            Discounting it the group would still be off by{' '}
+            <span className="font-mono text-warn">
+              {formatMinor(balance_without_duplicates_minor)}
+            </span>
+            , so there is something else wrong here too.
+          </>
+        )}{' '}
+        The amounts are left counted: the file and the counterparty genuinely
+        disagree, and which one is right is your call.
+      </p>
+    </div>
+  )
+}
+
 function MemberRow({
   member,
   groupKey,
@@ -37,14 +83,29 @@ function MemberRow({
   const entries = Object.entries(data).filter(([k]) => k !== '__row')
 
   return (
-    <div className="rounded-lg border border-line bg-base/40 p-3">
+    <div
+      className={
+        'rounded-lg border bg-base/40 p-3 ' +
+        (member.duplicate_of !== null ? 'border-warn/40' : 'border-line')
+      }
+    >
       <div className="mb-2 flex items-baseline gap-2">
         <span className="font-mono text-[12px] text-accent">{member.dataset}</span>
         {member.role && (
           <span className="pill border-line text-[10px] text-muted">{member.role}</span>
         )}
         <span className="font-mono text-[10px] text-faint">row {member.row}</span>
-        <span className="ml-auto font-mono text-[12px] tabular-nums">
+        {member.duplicate_of !== null && (
+          <span className="pill border-warn/40 bg-warn/10 text-[10px] text-warn">
+            duplicate of row {member.duplicate_of}
+          </span>
+        )}
+        <span
+          className={
+            'ml-auto font-mono text-[12px] tabular-nums ' +
+            (member.duplicate_of !== null ? 'text-warn' : '')
+          }
+        >
           {formatMinor(member.amount_minor)}
         </span>
       </div>
@@ -153,6 +214,10 @@ export default function ProposalModal() {
           {detail && (
             <div className="space-y-4">
               <p className="text-[12px] text-muted">{CONFIDENCE_WHY[detail.confidence]}</p>
+
+              {detail.duplicates && (
+                <DuplicateNote duplicates={detail.duplicates} />
+              )}
 
               <div>
                 <div className="eyebrow mb-2">Evidence · {detail.members.length} rows</div>

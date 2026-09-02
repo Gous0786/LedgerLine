@@ -58,7 +58,12 @@ def render() -> str:
             (d["id"],),
         )
         rendered = " ".join(f"{c['column_name']}:{c['inferred_type']}" for c in cols)
-        lines.append(f"  {d['name']} ({d['row_count']} rows) {rendered}")
+        # The id is here because the tools that take a dataset can no longer be
+        # told it by `list_datasets`. They accept the name too, but a model that
+        # can see both never has to guess which one is wanted.
+        lines.append(
+            f"  {d['name']} [id {d['id']}] ({d['row_count']} rows) {rendered}"
+        )
 
     views = db.query("SELECT name FROM dataset_view ORDER BY name")
     if views:

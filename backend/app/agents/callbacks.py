@@ -41,14 +41,21 @@ log = logging.getLogger(__name__)
 # one result, so what remains is a handful of questions about specific breaks.
 EXPLORE_BUDGET = 6
 
-# Tools that look. The ones that *do* something -- auto_match_exact,
-# propose_matches, create_view, set_spine, verify_match -- are never budgeted,
+# Tools that look. `run_reconciliation` is never budgeted, in either mode,
 # because running out of budget must never mean leaving the job half done.
 EXPLORATORY = frozenset({
-    "run_sql", "profile_columns", "trace_record", "list_datasets",
-    "find_join_candidates", "list_proposals", "get_proposal",
-    "list_unmatched", "reconciliation_status", "get_row_history",
+    "query_data", "describe_dataset", "list_datasets",
+    "get_exceptions", "get_transaction_chain",
 })
+
+# ~1.5k tokens. Chosen against measured results: the heaviest tool results came
+# in around 7.5k characters, carrying long lists whose tail adds nothing a
+# summary would not.
+MAX_TOOL_RESULT_CHARS = 6_000
+
+# Never trim below this many items -- a truncated list that shows nothing is
+# worse than one that shows a few.
+MIN_KEPT_ITEMS = 3
 
 _explored: contextvars.ContextVar[int] = contextvars.ContextVar(
     "recon_explore_calls", default=0
@@ -58,15 +65,6 @@ _explored: contextvars.ContextVar[int] = contextvars.ContextVar(
 def begin_turn() -> None:
     """Reset the per-turn exploration budget."""
     _explored.set(0)
-
-# ~1.5k tokens. Chosen against measured results: the two heaviest tools
-# (find_join_candidates, list_proposals) came in around 7.5k characters, and
-# both carry long lists whose tail adds nothing a summary would not.
-MAX_TOOL_RESULT_CHARS = 6_000
-
-# Never trim below this many items -- a truncated list that shows nothing is
-# worse than one that shows a few.
-MIN_KEPT_ITEMS = 3
 
 
 def _size(payload: Any) -> int:
