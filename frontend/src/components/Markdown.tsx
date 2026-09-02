@@ -53,13 +53,13 @@ const components: Components = {
       )
     }
     return (
-      <code className="rounded bg-base/60 px-1 py-0.5 font-mono text-[11px] text-cyan">
+      <code className="rounded bg-sunk px-1 py-0.5 font-mono text-[11px] text-accent-deep">
         {children}
       </code>
     )
   },
   pre: ({ children }) => (
-    <pre className="mb-2 overflow-x-auto rounded-lg border border-line bg-base/40 p-2.5 last:mb-0">
+    <pre className="mb-2 overflow-x-auto rounded-lg border border-line bg-sunk/70 p-2.5 last:mb-0">
       {children}
     </pre>
   ),
@@ -68,7 +68,7 @@ const components: Components = {
       <table className="w-full border-collapse text-[12px]">{children}</table>
     </div>
   ),
-  thead: ({ children }) => <thead className="bg-base/40">{children}</thead>,
+  thead: ({ children }) => <thead className="bg-sunk/70">{children}</thead>,
   th: ({ children }) => (
     <th className="border-b border-line px-2.5 py-1.5 text-left font-medium text-muted">
       {children}

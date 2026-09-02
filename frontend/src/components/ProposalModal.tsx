@@ -12,7 +12,7 @@ import { useProposals } from '@/state/ProposalsContext'
 export const CONFIDENCE_TONE: Record<Confidence, string> = {
   exact: 'text-ok border-ok/40 bg-ok/10',
   within_tolerance: 'text-ok/80 border-ok/30 bg-ok/5',
-  high: 'text-cyan border-cyan/40 bg-cyan/10',
+  high: 'text-info border-info/40 bg-info/10',
   unbalanced: 'text-warn border-warn/40 bg-warn/10',
   ambiguous: 'text-bad border-bad/40 bg-bad/10',
 }
@@ -85,7 +85,7 @@ function MemberRow({
   return (
     <div
       className={
-        'rounded-lg border bg-base/40 p-3 ' +
+        'rounded-lg border bg-white/60 p-3 ' +
         (member.duplicate_of !== null ? 'border-warn/40' : 'border-line')
       }
     >
@@ -176,11 +176,11 @@ export default function ProposalModal() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-accent-deep/25 p-6 backdrop-blur-sm"
       onClick={close}
     >
       <div
-        className="glass flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl"
+        className="panel flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* header */}
@@ -275,21 +275,21 @@ export default function ProposalModal() {
           <button
             onClick={() => void decide('review_later')}
             disabled={busy}
-            className="ml-auto rounded-md border border-line px-3 py-1.5 text-[12px] text-muted transition-colors hover:border-warn hover:text-warn disabled:opacity-40"
+            className="btn btn-ghost ml-auto"
           >
             Review later
           </button>
           <button
             onClick={() => void decide('rejected')}
             disabled={busy}
-            className="rounded-md border border-line px-3 py-1.5 text-[12px] text-muted transition-colors hover:border-bad hover:text-bad disabled:opacity-40"
+            className="btn btn-ghost"
           >
             Reject
           </button>
           <button
             onClick={() => void decide('accepted')}
             disabled={busy}
-            className="rounded-md bg-ok/20 px-3 py-1.5 text-[12px] text-ok transition-colors hover:bg-ok/30 disabled:opacity-40"
+            className="btn btn-primary"
           >
             Accept
           </button>

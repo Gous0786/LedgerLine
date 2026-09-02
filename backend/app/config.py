@@ -45,6 +45,26 @@ class Settings(BaseSettings):
     # and it is inert where unsupported.
     enable_prompt_cache: bool = True
 
+    # A single model call has been measured at 6-35 seconds through OpenRouter
+    # on a model that should answer in one or two, and one turn died at 34s with
+    # a mid-stream timeout. So the ceiling is stated here rather than inherited,
+    # and a stalled call is retried instead of losing the turn.
+    model_timeout_seconds: float = 120.0
+    model_retries: int = 2
+
+    # OpenRouter routes to whichever provider is serving a model; some are far
+    # slower than others. Asking it to sort by throughput is the one lever that
+    # attacks per-call latency directly. Inert on providers that ignore it.
+    prefer_fast_provider: bool = True
+
+    # Models to try when a call fails mid-stream. The observed failure is
+    # `MidStreamFallbackError` -- litellm reporting that the stream broke and it
+    # had nothing to fall back to. The break is OpenRouter's upstream provider
+    # aborting (`error_type: timeout`), not our client timing out, so no client
+    # setting prevents it: the only cure is somewhere else to go.
+    # e.g. MODEL_FALLBACKS='["openrouter/anthropic/claude-haiku-4.5"]'
+    model_fallbacks: list[str] = []
+
     model_orchestrator: str = "openrouter/stealth/ox-alpha"
     model_worker: str = "openrouter/stealth/ox-alpha"
 

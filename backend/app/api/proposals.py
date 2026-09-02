@@ -138,6 +138,52 @@ async def latest_verification(proposal_id: int) -> dict[str, Any]:
     return found or {"proposal_id": proposal_id, "status": None, "invariants": []}
 
 
+class BatchStatus(BaseModel):
+    ids: list[int]
+    status: str
+    note: str | None = None
+    force: bool = False
+
+
+@router.post("/status")
+async def set_status_batch(body: BatchStatus) -> dict[str, Any]:
+    """Decide several proposals at once.
+
+    A transaction chain is a set of matches, so accepting the chain is
+    accepting each leg -- and each leg still goes through the same release gate
+    on its own. One verification failure holds that leg back without touching
+    the rest, which is why this reports per-id rather than succeeding or
+    failing as a block: "the order matched but the settlement did not" is the
+    answer, not an error.
+    """
+    if body.status not in VALID_STATUS:
+        raise HTTPException(400, f"status must be one of {VALID_STATUS}")
+    if not body.ids:
+        return {"changed": 0, "blocked": 0, "results": []}
+
+    results = []
+    changed = blocked = 0
+    for pid in body.ids[:200]:
+        try:
+            r = await db.run(
+                matching.set_status, pid, body.status, "human", body.note, body.force
+            )
+        except matching.MatchError as exc:
+            results.append({"proposal_id": pid, "error": str(exc)})
+            continue
+        if r.get("blocked"):
+            blocked += 1
+            results.append({
+                "proposal_id": pid,
+                "blocked": True,
+                "failures": r["verification"]["failures"],
+            })
+        else:
+            changed += 1
+            results.append({"proposal_id": pid, "status": r["status"]})
+    return {"changed": changed, "blocked": blocked, "results": results}
+
+
 class SweepRequest(BaseModel):
     # Defaults to what matters: everything currently counted as reconciled.
     status: str = "accepted"

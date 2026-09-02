@@ -672,7 +672,7 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
         try:
             outcome = matching.propose_matches(
                 rule=rule, tier=1, sql=sql, description=description,
-                tolerance_minor=tolerance,
+                tolerance_minor=tolerance, author=matching.SYSTEM,
             )
         except Exception as exc:
             results.append({"rule": rule, "error": f"{type(exc).__name__}: {exc}"})

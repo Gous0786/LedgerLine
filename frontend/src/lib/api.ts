@@ -195,6 +195,56 @@ export function formatMinor(minor: number | null | undefined): string {
 
 // ---------------------------------------------------------------- rules --
 
+export interface DatasetCoverage {
+  dataset: string
+  dataset_id: string
+  rows: number
+  matched_in_any_edge: number
+  matched_in_no_edge: number
+}
+
+export interface EdgeCoverage {
+  edge: string
+  sides: { dataset: string; dataset_id: string; rows: number; matched: number; unmatched: number }[]
+}
+
+export interface Coverage {
+  datasets: DatasetCoverage[]
+  edges: EdgeCoverage[]
+  totals: { rows: number; matched: number; unmatched: number }
+}
+
+export function getCoverage() {
+  return request<Coverage>('/coverage')
+}
+
+export interface BatchStatusResult {
+  changed: number
+  blocked: number
+  results: {
+    proposal_id: number
+    status?: ProposalStatus
+    blocked?: boolean
+    failures?: string[]
+    error?: string
+  }[]
+}
+
+/** Decide several matches at once -- accepting a chain is accepting its legs.
+ *  Each still passes the release gate on its own, so a partial result is the
+ *  normal outcome rather than an error. */
+export function setProposalStatusBatch(
+  ids: number[],
+  status: ProposalStatus,
+  note?: string,
+) {
+  return request<BatchStatusResult>('/proposals/status', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ids, status, note }),
+  })
+}
+
 export interface RuleTrust {
   rule: string
   status: 'unproven' | 'trusted' | 'retired'

@@ -1,23 +1,35 @@
 @import 'tailwindcss';
 
-/* Tokens declared here become real utilities: bg-raise, text-muted, border-line.
-   (Do NOT use bg-[--color-x] — that emits `background-color: --color-x`, which
+/* Tokens declared here become real utilities: bg-sunk, text-muted, border-line.
+   (Do NOT use bg-[--color-x] -- that emits `background-color: --color-x`, which
    is invalid CSS and silently does nothing.) */
 @theme {
-  --color-base: #0b0f17;
-  --color-raise: #121829;
-  --color-ink: #e8ecf4;
-  --color-muted: #94a1b8;
-  --color-faint: #5c6880;
-  --color-line: #212a3d;
-  --color-accent: #5b7cfa;
-  --color-violet: #a855f7;
-  --color-cyan: #22d3ee;
-  --color-ok: #34d399;
-  --color-warn: #fbbf24;
-  --color-bad: #fb7185;
+  /* Paper, not grey. The surfaces are white and near-white so the green mesh
+     underneath is the only colour doing any work. */
+  --color-base: #ffffff;
+  --color-raise: #f6faf6;
+  --color-sunk: #eef5ef;
+
+  /* Ink is a very dark green rather than black: on a green ground, neutral
+     black reads as a foreign object. */
+  --color-ink: #0d2b16;
+  --color-muted: #47654f;
+  --color-faint: #8ba694;
+  --color-line: #dceadf;
+  --color-line-strong: #bcd6c2;
+
+  --color-accent: #16a34a;
+  --color-accent-deep: #14532d;
+  --color-accent-soft: #dcfce7;
+
+  --color-ok: #16a34a;
+  --color-warn: #b45309;
+  --color-bad: #be123c;
+  --color-info: #0e7490;
 
   --font-mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+
+  --radius-panel: 18px;
 }
 
 @layer base {
@@ -27,26 +39,18 @@
     height: 100%;
   }
 
-  /* Graph-paper grid over a deep base, with an aurora mesh glowing through. */
+  /* The mesh from the brief: soft green clouds bleeding in from the corners of
+     a white page. Fixed, so scrolling a panel does not drag the light with it. */
   body {
     margin: 0;
     color: var(--color-ink);
     font-family: ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
     -webkit-font-smoothing: antialiased;
-
-    background-color: #0b0f17;
+    background-color: #ffffff;
     background-image:
-      linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px),
-      radial-gradient(at 0% 0%, rgba(31, 41, 234, 0.15) 0px, transparent 50%),
-      radial-gradient(at 100% 100%, rgba(147, 51, 234, 0.15) 0px, transparent 50%),
-      radial-gradient(at 50% 50%, rgba(6, 182, 212, 0.05) 0px, transparent 50%);
-    background-size:
-      28px 28px,
-      28px 28px,
-      100% 100%,
-      100% 100%,
-      100% 100%;
+      radial-gradient(58% 44% at 12% 8%, rgba(34, 197, 94, 0.38) 0%, rgba(34, 197, 94, 0) 100%),
+      radial-gradient(46% 40% at 92% 88%, rgba(21, 128, 61, 0.34) 0%, rgba(21, 128, 61, 0) 100%),
+      radial-gradient(38% 34% at 78% 16%, rgba(134, 239, 172, 0.32) 0%, rgba(134, 239, 172, 0) 100%);
     background-attachment: fixed;
   }
 
@@ -54,50 +58,54 @@
   textarea,
   button {
     font: inherit;
+    color: inherit;
   }
 
   ::selection {
-    background: rgba(91, 124, 250, 0.3);
+    background: rgba(22, 163, 74, 0.18);
   }
 
   ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+    width: 9px;
+    height: 9px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: rgba(148, 163, 184, 0.16);
+    background: rgba(19, 78, 46, 0.16);
     border-radius: 999px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: rgba(148, 163, 184, 0.28);
+    background: rgba(19, 78, 46, 0.3);
   }
 }
 
 /* These MUST live in the components layer. Rules written outside any @layer
-   beat every layered rule, which would let .glass's border override utilities
+   beat every layered rule, which would let .panel's border override utilities
    like border-y-0. */
 @layer components {
-  /* Frosted surface that lets the grid and aurora read through. */
-  .glass {
-    background: rgba(17, 23, 38, 0.55);
-    backdrop-filter: blur(14px);
-    border: 1px solid rgba(148, 163, 184, 0.1);
+  /* The one surface in the app. Translucent so the mesh reads through it --
+     that is what stops a white card on a white page from looking like a hole. */
+  .panel {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(18px) saturate(1.1);
+    border: 1px solid rgba(220, 234, 223, 0.9);
+    border-radius: var(--radius-panel);
   }
 
-  .glass-soft {
-    background: rgba(17, 23, 38, 0.72);
+  .panel-flat {
+    background: rgba(255, 255, 255, 0.55);
     backdrop-filter: blur(10px);
+    border: 1px solid rgba(220, 234, 223, 0.7);
   }
 
-  /* Small uppercase section label. */
   .eyebrow {
     font-size: 10px;
-    letter-spacing: 0.11em;
+    letter-spacing: 0.13em;
     text-transform: uppercase;
     color: var(--color-faint);
+    font-weight: 500;
   }
 
   .pill {
@@ -105,9 +113,158 @@
     align-items: center;
     gap: 0.35rem;
     border-radius: 999px;
-    padding: 0.1rem 0.5rem;
+    padding: 0.15rem 0.6rem;
     font-size: 11px;
-    line-height: 1.5;
+    line-height: 1.55;
     border: 1px solid transparent;
+    white-space: nowrap;
+  }
+
+  /* Primary action: the deep green of the reference, not the bright accent --
+     bright green at button size is loud and hurts on white. */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 999px;
+    padding: 0.55rem 1.15rem;
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease,
+      transform 140ms ease;
+  }
+  .btn:active {
+    transform: translateY(0.5px);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--color-accent-deep);
+    color: #f0fdf4;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: #0f3d21;
+  }
+
+  .btn-ghost {
+    background: rgba(255, 255, 255, 0.6);
+    border-color: var(--color-line);
+    color: var(--color-ink);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    border-color: var(--color-line-strong);
+    background: #ffffff;
+  }
+
+  .btn-quiet {
+    background: transparent;
+    color: var(--color-muted);
+  }
+  .btn-quiet:hover:not(:disabled) {
+    color: var(--color-ink);
+    background: rgba(255, 255, 255, 0.6);
+  }
+
+  /* Text inputs read as a line, not a box, until focused. */
+  .field {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.75);
+    border: 1px solid var(--color-line);
+    border-radius: 999px;
+    padding: 0.7rem 1.1rem;
+    outline: none;
+    transition:
+      border-color 140ms ease,
+      box-shadow 140ms ease;
+  }
+  .field::placeholder {
+    color: var(--color-faint);
+  }
+  .field:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.13);
+  }
+
+  /* Streaming caret for text still arriving. */
+  .caret::after {
+    content: '';
+    display: inline-block;
+    width: 2px;
+    height: 0.95em;
+    margin-left: 2px;
+    vertical-align: -0.12em;
+    background: var(--color-accent);
+    animation: blink 1.05s steps(2, start) infinite;
+  }
+
+  @keyframes blink {
+    to {
+      visibility: hidden;
+    }
+  }
+
+  /* Four dots passing a rise between them, left to right. Used in the gap
+     where the next answer will appear -- a spinner says "busy", this says
+     "something is coming, here". */
+  .dots {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 4px;
+    height: 12px;
+  }
+  .dots > i {
+    width: 5px;
+    height: 5px;
+    border-radius: 999px;
+    background: var(--color-accent);
+    animation: juggle 1.15s cubic-bezier(0.36, 0, 0.24, 1) infinite;
+  }
+  /* The stagger is under a third of the cycle, so the wave is always mid-flight
+     rather than four dots taking turns. */
+  .dots > i:nth-child(2) {
+    animation-delay: 0.11s;
+  }
+  .dots > i:nth-child(3) {
+    animation-delay: 0.22s;
+  }
+  .dots > i:nth-child(4) {
+    animation-delay: 0.33s;
+  }
+
+  @keyframes juggle {
+    0%,
+    62%,
+    100% {
+      transform: translateY(0) scale(1);
+      opacity: 0.32;
+    }
+    31% {
+      transform: translateY(-7px) scale(1.15);
+      opacity: 1;
+    }
+  }
+
+  .rise {
+    animation: rise 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
 }

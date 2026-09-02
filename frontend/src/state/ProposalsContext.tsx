@@ -8,11 +8,15 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import {
+  getCoverage,
   listProposals,
   listRules,
   proposalSummary,
   setProposalStatus,
+  setProposalStatusBatch,
   trustRule,
+  type BatchStatusResult,
+  type Coverage,
   type Proposal,
   type ProposalStatus,
   type ProposalSummary,
@@ -23,6 +27,8 @@ import { useChatState } from '@/state/ChatContext'
 interface ProposalsContextValue {
   proposals: Proposal[]
   summary: ProposalSummary | null
+  coverage: Coverage | null
+  actMany: (ids: number[], status: ProposalStatus) => Promise<BatchStatusResult>
   rules: RuleTrust[]
   approveRule: (rule: string) => Promise<void>
   byId: (id: number) => Proposal | undefined
@@ -43,19 +49,22 @@ export function ProposalsProvider({ children }: { children: React.ReactNode }) {
   const [proposals, setProposals] = useState<Proposal[]>([])
   const [summary, setSummary] = useState<ProposalSummary | null>(null)
   const [rules, setRules] = useState<RuleTrust[]>([])
+  const [coverage, setCoverage] = useState<Coverage | null>(null)
   const [openId, setOpenId] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
-      const [list, sum, rs] = await Promise.all([
+      const [list, sum, rs, cov] = await Promise.all([
         listProposals(''),
         proposalSummary(),
         listRules(),
+        getCoverage(),
       ])
       setProposals(list)
       setSummary(sum)
       setRules(rs)
+      setCoverage(cov)
     } catch {
       /* backend may not be up yet */
     }
@@ -87,6 +96,24 @@ export function ProposalsProvider({ children }: { children: React.ReactNode }) {
     [refresh],
   )
 
+  /** Accepting a chain is accepting its legs -- each still gated on its own,
+   *  so a partial result is normal and the caller reports what was held back. */
+  const actMany = useCallback(
+    async (ids: number[], status: ProposalStatus): Promise<BatchStatusResult> => {
+      setBusy(true)
+      setProposals((all) =>
+        all.map((p) => (ids.includes(p.id) ? { ...p, status } : p)),
+      )
+      try {
+        return await setProposalStatusBatch(ids, status)
+      } finally {
+        await refresh()
+        setBusy(false)
+      }
+    },
+    [refresh],
+  )
+
   const approveRule = useCallback(
     async (rule: string) => {
       setBusy(true)
@@ -105,8 +132,10 @@ export function ProposalsProvider({ children }: { children: React.ReactNode }) {
     return {
       proposals,
       summary,
+      coverage,
       rules,
       approveRule,
+      actMany,
       byId,
       pending: proposals.filter((p) => p.status === 'pending' || p.status === 'review_later'),
       accepted: proposals.filter((p) => p.status === 'accepted'),
@@ -117,7 +146,7 @@ export function ProposalsProvider({ children }: { children: React.ReactNode }) {
       refresh,
       busy,
     }
-  }, [proposals, summary, rules, approveRule, openId, act, refresh, busy])
+  }, [proposals, summary, coverage, rules, approveRule, actMany, openId, act, refresh, busy])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

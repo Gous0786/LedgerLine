@@ -29,6 +29,17 @@ ENUM_MAX_DISTINCT = 12
 # Only surface pairs where one side is meaningfully covered by the other.
 MIN_COVERAGE = 0.25
 
+# How many rows of one source a value may match before it is read as naming a
+# group rather than a transaction. An identifier can legitimately repeat a
+# little -- a capture and a refund, a duplicated line -- but a value reaching
+# more rows than this is a batch, and traversing it fuses every transaction in
+# that batch into the answer.
+FANOUT = 4
+
+# A trace is an answer, not an export. Past this it has stopped being about one
+# transaction, and the caller is better served by a cap than by a page of rows.
+MAX_HITS = 24
+
 
 def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -287,9 +298,23 @@ def trace_record(value: str, max_hops: int = 2) -> dict[str, Any]:
                     try:
                         rows = sqlguard.select_all(
                             settings.db_path,
-                            f"SELECT * FROM {table} WHERE {c} = '{safe}' LIMIT 20",
+                            f"SELECT * FROM {table} WHERE {c} = '{safe}'"
+                            f" LIMIT {FANOUT + 1}",
                         )
                     except Exception:
+                        continue
+
+                    # A value that matches a crowd of rows in one source is a
+                    # *grouping* key, not this transaction's identifier: one
+                    # settlement batch id reaches nineteen sibling captures,
+                    # and following those reaches nineteen unrelated orders.
+                    # The row it uniquely identifies elsewhere -- the bank
+                    # credit -- is still found, because there it matches once.
+                    #
+                    # Hop 0 is exempt: whatever was asked about is the subject,
+                    # so "what happened to this batch" still answers with the
+                    # batch. The guard is on values discovered along the way.
+                    if hop > 0 and len(rows) > FANOUT:
                         continue
                     for r in rows:
                         key = (ds["id"], int(r["__row"]))
@@ -319,8 +344,10 @@ def trace_record(value: str, max_hops: int = 2) -> dict[str, Any]:
         frontier = next_frontier
 
     hits.sort(key=lambda h: (h["hop"], h["dataset"], h["row"]))
+    truncated = len(hits) > MAX_HITS
     return {
         "value": value,
         "datasets_touched": sorted({h["dataset"] for h in hits}),
-        "hits": hits,
+        "hits": hits[:MAX_HITS],
+        **({"note": f"{len(hits) - MAX_HITS} further row(s) not shown"} if truncated else {}),
     }

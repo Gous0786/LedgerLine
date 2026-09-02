@@ -4,10 +4,17 @@ Reconciliation chains hang off an anchor -- the spine -- and the right anchor is
 where a transaction *begins*: the order, not the bank credit that eventually
 settles it.
 
-**Time decides.** A transaction moves forward through the sources, so the one
-with the earliest events is the origin. This is the signal that generalises:
-orders precede captures, captures precede settlements, and that ordering holds
-whatever the columns happen to be called.
+**Time decides, but only within a match.** A transaction moves forward through
+the sources, so the source whose row is earlier *for the same transaction* is
+upstream. Orders precede captures, captures precede settlements, and that holds
+whatever the columns are called.
+
+Comparing whole sources instead -- each one's median timestamp -- looks
+equivalent and is not, because it compares different populations. On a sampled
+dataset the bank rows fell in an earlier fortnight than the orders, so the
+median said settlements start a transaction and every chain read backwards.
+Joining first makes both sides the same transactions, and the signal stops
+being a lean and becomes a fact: 261 of 261 matched rows, then 250 of 250.
 
 Containment direction (if A's values are a subset of B's, B is referenced) is
 kept only as a fallback, because it answers a different question. It says which
@@ -44,6 +51,13 @@ SETTING_KEY = "spine_dataset_id"
 # A value is treated as contained when essentially all of it appears on the
 # other side; real foreign keys are rarely perfectly clean.
 CONTAINMENT = 0.99
+
+# How consistently one side must be earlier, across matched rows, before it is
+# called upstream. Deliberately strict: the comparison is apples-to-apples so a
+# real flow agrees on nearly every row, and anything close to a coin toss means
+# the two sources are not ordered by these timestamps at all.
+PRECEDENCE_AGREEMENT = 0.8
+MIN_PAIR_ROWS = 5
 
 
 def _identifier_types(dataset_id: str) -> dict[str, str]:
@@ -94,6 +108,92 @@ def _earliest_event(dataset_id: str, table_name: str) -> str | None:
     return best
 
 
+def precedence() -> list[tuple[str, str, int, int]]:
+    """Which source's rows come first, compared *within a match*.
+
+    The earlier version took each source's median timestamp and ranked them.
+    That compares different populations, and on a sampled dataset it inverts:
+    the bank rows happened to cluster in an earlier fortnight than the orders,
+    so the statement landed on "settlements start a transaction", and every
+    chain read backwards.
+
+    Joining first fixes it, because then both sides are the *same*
+    transactions. Measured on that dataset the signal is not merely better, it
+    is unambiguous: internal precedes processor in 261 of 261 matched rows, and
+    processor precedes bank in 250 of 250.
+
+    Returns `(earlier_id, later_id, agreeing_rows, compared_rows)`.
+    """
+    datasets = {d["name"]: d for d in db.query(
+        "SELECT id, name, table_name FROM dataset WHERE status = 'ready'"
+    )}
+    stamps = {
+        d["id"]: [
+            c["column_name"] for c in db.query(
+                "SELECT column_name FROM dataset_column WHERE dataset_id = ?"
+                " AND inferred_type IN ('DATE','TIMESTAMP') ORDER BY ordinal",
+                (d["id"],),
+            )
+        ]
+        for d in datasets.values()
+    }
+
+    p = get_settings().db_path
+    edges: list[tuple[str, str, int, int]] = []
+    for pair in discovery.find_join_candidates()["pairs"]:
+        left, right = datasets.get(pair["left_dataset"]), datasets.get(pair["right_dataset"])
+        if not left or not right:
+            continue
+        best: tuple[int, int] | None = None
+        for lts in stamps.get(left["id"], []):
+            for rts in stamps.get(right["id"], []):
+                sql = (
+                    f'SELECT COUNT(*) AS n,'
+                    f' SUM(CASE WHEN l."{lts}" < r."{rts}" THEN 1 ELSE 0 END) AS earlier'
+                    f' FROM "{left["table_name"]}" l'
+                    f' JOIN "{right["table_name"]}" r'
+                    f'   ON r."{pair["right_column"]}" = l."{pair["left_column"]}"'
+                    # Only ISO-shaped values: anything else does not sort as text,
+                    # and a DD/MM column would rank by day of month.
+                    f' WHERE l."{lts}" GLOB \'[0-9][0-9][0-9][0-9]-*\''
+                    f'   AND r."{rts}" GLOB \'[0-9][0-9][0-9][0-9]-*\''
+                )
+                try:
+                    row = sqlguard.select_all(p, sql)[0]
+                except Exception:
+                    continue
+                n = row["n"] or 0
+                if n < MIN_PAIR_ROWS:
+                    continue
+                if best is None or n > best[1]:
+                    best = (row["earlier"] or 0, n)
+        if best is None:
+            continue
+        earlier, n = best
+        if earlier / n >= PRECEDENCE_AGREEMENT:
+            edges.append((left["id"], right["id"], earlier, n))
+        elif (n - earlier) / n >= PRECEDENCE_AGREEMENT:
+            edges.append((right["id"], left["id"], n - earlier, n))
+    return edges
+
+
+def _ordered_by_precedence(edges: list[tuple[str, str, int, int]]) -> list[str] | None:
+    """Sources in flow order: fewest things preceding them first."""
+    if not edges:
+        return None
+    before: dict[str, set[str]] = {}
+    for earlier, later, _, _ in edges:
+        before.setdefault(later, set()).add(earlier)
+        before.setdefault(earlier, set())
+    # Transitive closure, so a three-stage chain orders correctly rather than
+    # relying on the two edges happening to be discovered in order.
+    for _ in range(len(before)):
+        for node, preds in before.items():
+            for p in list(preds):
+                preds |= before.get(p, set()) - {node}
+    return sorted(before, key=lambda n: (len(before[n]), n))
+
+
 def infer_spine() -> dict[str, Any]:
     """Pick the source where transactions begin."""
     datasets = db.query(
@@ -111,7 +211,31 @@ def infer_spine() -> dict[str, Any]:
             "origin": "inferred",
         }
 
-    # --- primary signal: which source's events come first ---
+    # --- primary signal: which side is earlier within a match ---
+    edges = precedence()
+    order = _ordered_by_precedence(edges)
+    if order:
+        names = {d["id"]: d["name"] for d in datasets}
+        first = order[0]
+        followers = [names.get(x, x) for x in order[1:]]
+        return {
+            "dataset_id": first,
+            "name": names.get(first, first),
+            "reason": (
+                "earliest within every match"
+                + (f", ahead of {', '.join(followers)}" if followers else "")
+            ),
+            "scores": [
+                {"earlier": names.get(a, a), "later": names.get(b, b),
+                 "agreeing_rows": k, "compared_rows": n}
+                for a, b, k, n in edges
+            ],
+            "origin": "inferred",
+        }
+
+    # --- fallback: whole-source medians ---
+    # Only reached when no two sources share both a key and comparable
+    # timestamps. It compares different populations, so it is a guess.
     timing = {
         d["id"]: _earliest_event(d["id"], d["table_name"])
         for d in db.query(
@@ -209,14 +333,26 @@ def infer_spine() -> dict[str, Any]:
 def stage_order() -> list[dict[str, Any]]:
     """Sources in the order a transaction moves through them.
 
-    Same signal as the spine itself -- earliest events first -- so the flow
-    reads order, then processor, then bank. Sources with no usable timestamp
-    are appended in upload order rather than dropped.
+    Same signal as the spine itself, so the chain and its origin cannot
+    disagree. Sources that take part in no measured precedence are appended in
+    upload order rather than dropped.
     """
     datasets = db.query(
         "SELECT id, name, table_name FROM dataset WHERE status = 'ready'"
         " ORDER BY created_at"
     )
+    names = {d["id"]: d["name"] for d in datasets}
+
+    order = _ordered_by_precedence(precedence())
+    if order:
+        ranked = [{"dataset_id": i, "name": names[i]} for i in order if i in names]
+        rest = [
+            {"dataset_id": d["id"], "name": d["name"]}
+            for d in datasets
+            if d["id"] not in set(order)
+        ]
+        return ranked + rest
+
     dated, undated = [], []
     for d in datasets:
         when = _earliest_event(d["id"], d["table_name"])

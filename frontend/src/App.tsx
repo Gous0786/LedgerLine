@@ -1,66 +1,24 @@
-import { useEffect, useRef, useState } from 'react'
-import TopBar from '@/components/TopBar'
-import StatePanel from '@/components/StatePanel'
-import MetricsPanel from '@/components/MetricsPanel'
-import ActivityStream from '@/components/ActivityStream'
-import DataView from '@/components/DataView'
-import ReconciledTab from '@/components/ReconciledTab'
-import ProposalModal from '@/components/ProposalModal'
-import ChatBar from '@/components/ChatBar'
-import { ChatProvider, useChatState } from '@/state/ChatContext'
+/**
+ * Providers wrap the router, not the other way round.
+ *
+ * The chat stream in particular has to outlive a route change: a question typed
+ * on the upload screen is sent there and answered on the workspace, and a
+ * provider mounted per-route would drop the stream mid-turn.
+ */
+
+import { RouterProvider, useRouter } from '@/app/router'
+import Home from '@/routes/Home'
+import Upload from '@/routes/Upload'
+import Workspace from '@/routes/Workspace'
+import { ChatProvider } from '@/state/ChatContext'
 import { DatasetsProvider } from '@/state/DatasetsContext'
-import { ProposalsProvider, useProposals } from '@/state/ProposalsContext'
+import { ProposalsProvider } from '@/state/ProposalsContext'
 
-type Mode = 'activity' | 'data' | 'reconciled'
-
-const MODES: { id: Mode; label: string }[] = [
-  { id: 'activity', label: 'Activity' },
-  { id: 'data', label: 'Data' },
-  { id: 'reconciled', label: 'Reconciled' },
-]
-
-function Workspace() {
-  const [mode, setMode] = useState<Mode>('data')
-  const { busy } = useChatState()
-  const { summary } = useProposals()
-  const wasBusy = useRef(false)
-
-  // Follow the work: when the agent starts, surface what it is doing. Only on
-  // the idle→busy edge, so a manual switch back to Data isn't yanked away.
-  useEffect(() => {
-    if (busy && !wasBusy.current) setMode('activity')
-    wasBusy.current = busy
-  }, [busy])
-
-  return (
-    <section className="glass flex min-w-0 flex-col overflow-hidden rounded-lg">
-      <div className="flex shrink-0 items-center gap-1 border-b border-line px-3 py-1.5">
-        {MODES.map((m) => (
-          <button
-            key={m.id}
-            onClick={() => setMode(m.id)}
-            className={
-              'rounded px-2.5 py-1 text-[12px] transition-colors ' +
-              (mode === m.id ? 'bg-accent/15 text-ink' : 'text-faint hover:text-muted')
-            }
-          >
-            {m.label}
-            {m.id === 'reconciled' && (summary?.needs_review ?? 0) > 0 && (
-              <span className="ml-1.5 rounded-full bg-warn/25 px-1.5 font-mono text-[10px] text-warn">
-                {summary?.needs_review}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-
-      <div className="min-h-0 flex-1">
-        {mode === 'activity' && <ActivityStream />}
-        {mode === 'data' && <DataView />}
-        {mode === 'reconciled' && <ReconciledTab />}
-      </div>
-    </section>
-  )
+function Screen() {
+  const { route } = useRouter()
+  if (route === '/upload') return <Upload />
+  if (route === '/workspace') return <Workspace />
+  return <Home />
 }
 
 export default function App() {
@@ -68,18 +26,9 @@ export default function App() {
     <DatasetsProvider>
       <ChatProvider>
         <ProposalsProvider>
-        <div className="flex h-full flex-col">
-          <TopBar />
-
-          <div className="grid min-h-0 flex-1 grid-cols-[15rem_minmax(0,1fr)_13rem] gap-3 p-3">
-            <StatePanel />
-            <Workspace />
-            <MetricsPanel />
-          </div>
-
-          <ChatBar />
-          <ProposalModal />
-        </div>
+          <RouterProvider>
+            <Screen />
+          </RouterProvider>
         </ProposalsProvider>
       </ChatProvider>
     </DatasetsProvider>

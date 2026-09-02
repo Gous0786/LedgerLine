@@ -34,6 +34,30 @@ from app.streaming import protocol as p
 log = logging.getLogger(__name__)
 
 
+def _explain(exc: BaseException) -> str:
+    """Say what happened in words, and say what survived.
+
+    A turn dies with `litellm.MidStreamFallbackError: litellm.Timeout: ...
+    OpenrouterException` and the reader concludes the reconciliation failed. It
+    did not: matching writes to the database as it goes, so everything the run
+    reached is already recorded and only the summary is lost. Saying so is the
+    difference between a scare and a retry.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    lowered = text.lower()
+    if "timeout" in lowered or "aborted" in lowered:
+        return (
+            "The model stopped responding, so this answer is incomplete."
+            " Any matching that had already run is saved -- reload the"
+            " reconciled panel to see it, or ask again for a summary."
+        )
+    if "rate" in lowered and "limit" in lowered:
+        return "The model provider is rate limiting. Wait a moment and ask again."
+    if "api key" in lowered or "401" in lowered or "auth" in lowered:
+        return "The model rejected the credentials. Check OPENROUTER_API_KEY."
+    return text
+
+
 async def translate(
     events: AsyncIterator[Any],
     *,
@@ -186,8 +210,10 @@ async def translate(
 
     except Exception as exc:
         log.exception("agent run failed")
+        # The raw exception goes to the run log for diagnosis; the reader gets
+        # the sentence.
         runlog.event("error", {"message": f"{type(exc).__name__}: {exc}"})
-        yield p.error(f"{type(exc).__name__}: {exc}")
+        yield p.error(_explain(exc))
 
     finally:
         if reasoning_open and reasoning_id is not None:

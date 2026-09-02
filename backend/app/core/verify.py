@@ -107,6 +107,7 @@ class Context:
         self.currency: dict[str, str | None] = {}
         self._rows: dict[tuple[str, int], dict[str, Any] | None] = {}
         self._baselines: dict[str, timing.Baseline | None] = {}
+        self._populations: dict[tuple[str, str], dict[str, int]] = {}
 
         for d in db.query("SELECT id, name, table_name FROM dataset"):
             self.tables[d["id"]] = d["table_name"]
@@ -141,6 +142,12 @@ class Context:
             " WHERE p.rule = ? AND p.status != 'rejected'",
             (rule,),
         )
+        # Every member of every group this rule produced, in one query per
+        # dataset. Asking row by row here was the most expensive statement in a
+        # reconciliation -- the baseline needs the whole population by
+        # definition, so it is the last place that should fetch one at a time.
+        self.prefetch([(m["dataset_id"], int(m["row"])) for m in members])
+
         by_proposal: dict[int, list[dict[str, Any]]] = {}
         for m in members:
             found = self.row(m["dataset_id"], m["row"])
@@ -154,6 +161,69 @@ class Context:
         result = timing.Baseline(spans) if spans else None
         self._baselines[rule] = result
         return result
+
+    def key_population(self, rule: str, dataset_id: str) -> dict[str, int]:
+        """`{group key: rows of this dataset carrying it}`, built once per rule.
+
+        Which column holds the key is not declared anywhere, so it is found the
+        way everything else here is -- by measuring: the column matching the
+        most of the rule's group keys wins. One GROUP BY then answers the
+        question for every proposal the rule produced, instead of a COUNT with
+        an OR across every column, per proposal, per dataset.
+        """
+        cached = self._populations.get((rule, dataset_id))
+        if cached is not None:
+            return cached
+
+        table = self.tables.get(dataset_id)
+        keys = {
+            str(r["group_key"])
+            for r in db.query(
+                "SELECT DISTINCT group_key FROM match_proposal WHERE rule = ?", (rule,)
+            )
+        }
+        result: dict[str, int] = {}
+        if table and keys:
+            best = 0
+            for col in self.columns.get(dataset_id, []):
+                name = col.replace('"', '""')
+                try:
+                    counts = sqlguard.select_all(
+                        get_settings().db_path,
+                        f'SELECT "{name}" AS k, COUNT(*) AS n FROM "{table}"'
+                        f' WHERE "{name}" IS NOT NULL GROUP BY "{name}"',
+                    )
+                except Exception:
+                    continue
+                found = {str(c["k"]): int(c["n"]) for c in counts if str(c["k"]) in keys}
+                if len(found) > best:
+                    best, result = len(found), found
+
+        self._populations[(rule, dataset_id)] = result
+        return result
+
+    def prefetch(self, pairs: list[tuple[str, int]]) -> None:
+        """Load a group's source rows with one query per dataset, not per row."""
+        wanted: dict[str, list[int]] = {}
+        for ds_id, row in pairs:
+            if (ds_id, int(row)) not in self._rows:
+                wanted.setdefault(ds_id, []).append(int(row))
+        for ds_id, rows in wanted.items():
+            table = self.tables.get(ds_id)
+            if not table:
+                continue
+            ids = ",".join(str(r) for r in rows)
+            try:
+                found = sqlguard.select_all(
+                    get_settings().db_path,
+                    f'SELECT * FROM "{table}" WHERE __row IN ({ids})',
+                )
+            except Exception:
+                continue
+            for r in found:
+                self._rows[(ds_id, int(r["__row"]))] = r
+            for r in rows:
+                self._rows.setdefault((ds_id, r), None)
 
     def row(self, dataset_id: str, row: int) -> dict[str, Any] | None:
         key = (dataset_id, int(row))
@@ -271,6 +341,8 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
     # every batch the exclusion just corrected.
     counted = [m for m in members if duplicates.counts_toward_balance(m)]
     duplicated = [m for m in members if m["duplicate_of"] is not None]
+    ctx.prefetch([(m["dataset_id"], int(m["row"])) for m in members])
+
     tolerance = int(p["tolerance_minor"] or 0)
     invariants: list[dict[str, Any]] = []
 
@@ -497,29 +569,18 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
     # the rule did not take is unexplained activity attached to a match.
     leftover: list[str] = []
     for ds_id in ds_ids:
-        table = ctx.tables.get(ds_id)
-        if not table:
+        taken = sum(1 for m in members if m["dataset_id"] == ds_id)
+        # How many rows of this dataset carry the key at all, answered from a
+        # map built once per rule. The per-proposal version of this question
+        # was a COUNT with an OR across every column, and it was the single
+        # most expensive statement in a reconciliation.
+        total = ctx.key_population(p["rule"], ds_id).get(str(p["group_key"]))
+        if total is None:
             continue
-        taken = sorted(int(m["row"]) for m in members if m["dataset_id"] == ds_id)
-        key = str(p["group_key"]).replace("'", "''")
-        matches = [
-            f'"{c}" = \'{key}\'' for c in ctx.columns.get(ds_id, [])
-        ]
-        if not matches:
-            continue
-        exclude = (
-            " AND __row NOT IN (" + ",".join(str(r) for r in taken) + ")" if taken else ""
-        )
-        try:
-            found = sqlguard.select_all(
-                get_settings().db_path,
-                f'SELECT COUNT(*) n FROM "{table}"'
-                f" WHERE ({' OR '.join(matches)}){exclude}",
-            )[0]["n"]
-        except Exception:
-            continue
-        if found:
-            leftover.append(f"{found} unmatched row(s) in {ctx.names.get(ds_id, ds_id)}")
+        if total > taken:
+            leftover.append(
+                f"{total - taken} unmatched row(s) in {ctx.names.get(ds_id, ds_id)}"
+            )
     invariants.append(_inv(
         "no_residual_evidence",
         not leftover,
