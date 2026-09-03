@@ -52,6 +52,22 @@ export interface Dataset {
   error: string | null
   created_at: string
   column_count: number
+  duplicate_rows: number
+  near_duplicate_rows: number
+  exclude_duplicates: number
+}
+
+export function setDuplicatePolicy(datasetId: string, exclude: boolean) {
+  return request<{
+    dataset_id: string
+    exclude_duplicates: boolean
+    duplicate_rows: number
+    near_duplicate_rows: number
+    note: string
+  }>(`/datasets/${datasetId}/duplicates`, {
+    method: 'POST',
+    body: JSON.stringify({ exclude }),
+  })
 }
 
 export type CsvRow = Record<string, string | number | null>
@@ -252,6 +268,17 @@ export interface CloseReport {
   model: string
   period: { from: string | null; to: string | null }
   sources: { name: string; rows: number; columns: number; bytes: number; from: string | null; to: string | null }[]
+  duplicates: {
+    sources: {
+      dataset: string
+      rows: number
+      identical: number
+      same_event_different_id: number
+      excluded: boolean
+    }[]
+    rows_marked: number
+    rows_excluded: number
+  }
   value: Record<string, { reconciled?: number; open?: number; residual?: number }>
   coverage: {
     datasets: DatasetCoverage[]

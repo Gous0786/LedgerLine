@@ -86,6 +86,42 @@ LIMITS = [
 ]
 
 
+def _duplicates() -> dict[str, Any]:
+    """What each file repeated, and whether those rows were counted.
+
+    Reported per source rather than as one total: "nine rows repeated" is not
+    actionable, and which file did the repeating is the first thing anyone
+    asks. The policy is stated beside the count because the same number means
+    opposite things depending on it -- rows set aside, or rows still in the
+    figures above and waiting for someone.
+    """
+    rows = db.query(
+        "SELECT name, row_count, duplicate_rows, near_duplicate_rows,"
+        " exclude_duplicates FROM dataset WHERE status = 'ready'"
+        " AND (duplicate_rows > 0 OR near_duplicate_rows > 0) ORDER BY name"
+    )
+    per_source = [
+        {
+            "dataset": r["name"],
+            "rows": r["row_count"],
+            "identical": r["duplicate_rows"] or 0,
+            "same_event_different_id": r["near_duplicate_rows"] or 0,
+            "excluded": bool(r["exclude_duplicates"]),
+        }
+        for r in rows
+    ]
+    return {
+        "sources": per_source,
+        "rows_marked": sum(
+            s["identical"] + s["same_event_different_id"] for s in per_source
+        ),
+        "rows_excluded": sum(
+            s["identical"] + s["same_event_different_id"]
+            for s in per_source if s["excluded"]
+        ),
+    }
+
+
 def _limits() -> list[tuple[str, str]]:
     """The standing limits, plus any this particular close earned.
 
@@ -94,6 +130,22 @@ def _limits() -> list[tuple[str, str]]:
     attention when a key really was read out of free text.
     """
     limits = list(LIMITS)
+
+    counted = db.query_one(
+        "SELECT COUNT(*) n FROM dataset WHERE status = 'ready'"
+        " AND exclude_duplicates = 0"
+        " AND (duplicate_rows > 0 OR near_duplicate_rows > 0)"
+    )
+    if (counted or {}).get("n"):
+        limits.insert(0, (
+            "Repeated rows are still counted",
+            "At least one source records the same event more than once, and"
+            " those rows remain in every figure above. They are marked, and the"
+            " groups holding them read as breaks rather than as matches --"
+            " which is the intended outcome: a file disagreeing with itself is"
+            " a finding, not an arithmetic error to net out.",
+        ))
+
     inferred = db.query(
         "SELECT DISTINCT description FROM match_proposal"
         " WHERE description LIKE '%(read from %'"
@@ -115,7 +167,8 @@ def _period_and_sources() -> tuple[dict[str, str | None], list[dict[str, Any]]]:
     sources: list[dict[str, Any]] = []
     seen: list[str] = []
     for d in db.query(
-        "SELECT id, name, table_name, row_count, byte_size FROM dataset"
+        "SELECT id, name, table_name, row_count, byte_size, duplicate_rows,"
+        " near_duplicate_rows, exclude_duplicates FROM dataset"
         " WHERE status = 'ready' ORDER BY created_at"
     ):
         cols = db.query(
@@ -353,6 +406,7 @@ def build() -> dict[str, Any]:
         "model": get_settings().model_orchestrator,
         "period": period,
         "sources": sources,
+        "duplicates": _duplicates(),
         "value": _value_by_currency(ctx),
         "coverage": {
             "datasets": datasets,

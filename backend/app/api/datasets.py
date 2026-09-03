@@ -46,6 +46,7 @@ async def list_datasets() -> list[dict]:
         db.query,
         "SELECT d.id, d.name, d.original_name, d.role, d.row_count, d.byte_size,"
         "       d.delimiter, d.encoding, d.status, d.error, d.created_at,"
+        "       d.duplicate_rows, d.near_duplicate_rows, d.exclude_duplicates,"
         "       (SELECT COUNT(*) FROM dataset_column c WHERE c.dataset_id = d.id)"
         "         AS column_count"
         " FROM dataset d ORDER BY d.created_at ASC, d.rowid ASC",
@@ -100,6 +101,34 @@ async def get_dataset(dataset_id: str) -> dict[str, Any]:
         (dataset_id,),
     )
     return {**row, "columns": columns}
+
+
+@router.post("/{dataset_id}/duplicates")
+async def set_duplicate_policy(dataset_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Say whether this file's repeated rows are artefacts or findings.
+
+    A per-dataset decision because it is a claim about the file, not about the
+    system: only someone who knows how the export is produced can say that a
+    repeated line means the exporter ran twice rather than that the money moved
+    twice. Left off, duplicates are marked and still counted.
+    """
+    await _dataset_or_404(dataset_id)
+    exclude = 1 if body.get("exclude") else 0
+    await db.run(
+        db.execute,
+        "UPDATE dataset SET exclude_duplicates = ? WHERE id = ?",
+        (exclude, dataset_id),
+    )
+    row = await _dataset_or_404(dataset_id)
+    return {
+        "dataset_id": dataset_id,
+        "exclude_duplicates": bool(exclude),
+        "duplicate_rows": row["duplicate_rows"],
+        "near_duplicate_rows": row["near_duplicate_rows"],
+        # Nothing is re-matched here. The existing proposals were built under
+        # the old policy and saying so is better than silently leaving them.
+        "note": "run the reconciliation again for this to take effect",
+    }
 
 
 @router.get("/{dataset_id}/rows")

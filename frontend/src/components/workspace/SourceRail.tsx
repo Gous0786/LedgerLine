@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useState } from 'react'
-import { getRows, type CsvRow, type Dataset } from '@/lib/api'
+import { getRows, setDuplicatePolicy, type CsvRow, type Dataset } from '@/lib/api'
 import { Icon, Spinner } from '@/components/ui'
 import { useDatasets } from '@/state/DatasetsContext'
 
@@ -42,7 +42,13 @@ function Table({ dataset }: { dataset: Dataset }) {
     return <p className="px-4 py-6 text-[12px] text-faint">No rows.</p>
   }
 
-  const cols = Object.keys(rows[0]).filter((c) => c !== '__row')
+  // The mark columns are shown as a badge on the row rather than as two more
+  // columns of their own -- a reviewer scanning the file wants to see which
+  // line is the repeat, not read two mostly-empty columns.
+  const cols = Object.keys(rows[0]).filter(
+    (c) => c !== '__row' && c !== '__duplicate_of' && c !== '__duplicate_kind',
+  )
+  const marked = rows.filter((r) => r.__duplicate_of != null).length
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
@@ -60,24 +66,96 @@ function Table({ dataset }: { dataset: Dataset }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => (
-            <tr key={i} className="hover:bg-accent-soft/40">
-              {cols.map((c) => (
-                <td
-                  key={c}
-                  className="border-b border-line/60 px-2.5 py-1.5 whitespace-nowrap text-ink"
-                >
-                  {String(r[c] ?? '')}
-                </td>
-              ))}
-            </tr>
-          ))}
+          {rows.map((r, i) => {
+            const dup = r.__duplicate_of
+            return (
+              <tr
+                key={i}
+                className={
+                  dup != null
+                    ? 'bg-warn/[0.07] hover:bg-warn/[0.12]'
+                    : 'hover:bg-accent-soft/40'
+                }
+                title={
+                  dup != null
+                    ? `Repeats row ${dup}${
+                        r.__duplicate_kind === 'exact'
+                          ? ' exactly'
+                          : ' — same event, different id'
+                      }`
+                    : undefined
+                }
+              >
+                {cols.map((c, k) => (
+                  <td
+                    key={c}
+                    className="border-b border-line/60 px-2.5 py-1.5 whitespace-nowrap text-ink"
+                  >
+                    {k === 0 && dup != null && (
+                      <span className="mr-1.5 rounded-sm border border-warn/40 bg-warn/10 px-1 text-[9.5px] text-warn">
+                        dup of {String(dup)}
+                      </span>
+                    )}
+                    {String(r[c] ?? '')}
+                  </td>
+                ))}
+              </tr>
+            )
+          })}
         </tbody>
       </table>
       <p className="px-3 py-2 font-mono text-[10.5px] text-faint">
         first {rows.length} of {dataset.row_count.toLocaleString()} rows
+        {marked > 0 && (
+          <span className="text-warn">
+            {' '}
+            · {marked} repeated
+            {dataset.exclude_duplicates ? ', set aside' : ', still counted'}
+          </span>
+        )}
       </p>
     </div>
+  )
+}
+
+function DuplicatePolicy({ dataset }: { dataset: Dataset }) {
+  const { refresh } = useDatasets()
+  const [busy, setBusy] = useState(false)
+  const repeated = dataset.duplicate_rows + dataset.near_duplicate_rows
+  if (!repeated) return null
+
+  const excluded = Boolean(dataset.exclude_duplicates)
+
+  async function flip() {
+    setBusy(true)
+    try {
+      await setDuplicatePolicy(dataset.id, !excluded)
+      await refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <button
+      onClick={flip}
+      disabled={busy}
+      // The label says what the rows *are*, not what the switch does, because
+      // that is the judgement being made: whether a repeat in this file is an
+      // artefact of how it was exported or a second event that really happened.
+      title={
+        excluded
+          ? 'These rows are treated as the same event recorded twice, and left out of matching. Click to count them again.'
+          : 'These rows are counted, so a group holding one reads as a break. Click to treat them as the same event recorded twice.'
+      }
+      className={`rounded-full border px-2 py-0.5 text-[10.5px] transition-colors ${
+        excluded
+          ? 'border-accent/40 bg-accent-soft text-accent-deep'
+          : 'border-warn/40 bg-warn/10 text-warn'
+      } ${busy ? 'opacity-50' : 'hover:brightness-95'}`}
+    >
+      {repeated} repeated · {excluded ? 'set aside' : 'counted'}
+    </button>
   )
 }
 
@@ -107,6 +185,7 @@ export default function SourceRail() {
             <span className="font-mono text-[11px] text-faint">
               {active.row_count.toLocaleString()} × {active.column_count}
             </span>
+            <DuplicatePolicy dataset={active} />
             <button
               onClick={() => setOpen(false)}
               className="ml-auto text-faint hover:text-ink"

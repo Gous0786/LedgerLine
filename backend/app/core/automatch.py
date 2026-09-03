@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import get_settings
-from app.core import discovery, embedded, matching, sqlguard
+from app.core import discovery, duplicates, embedded, matching, sqlguard
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -284,7 +284,12 @@ def _has_column(source: str, column: str) -> bool:
 
 
 def _side(dataset: dict[str, Any], key: str, view: str | None) -> Side | None:
-    source = _quote(view) if view else _quote(dataset["table_name"])
+    # Rows this file records twice never reach a rule. Filtering here rather
+    # than correcting a balance later is what lets a group holding a duplicate
+    # tie by construction -- there is no correction, the row was never counted.
+    source = duplicates.filtered_source(
+        dataset, _quote(view) if view else _quote(dataset["table_name"])
+    )
     p = get_settings().db_path
     try:
         stat = sqlguard.select_all(
@@ -575,8 +580,8 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
     """Run the deterministic pass across every discovered join key."""
     datasets = {
         d["name"]: d for d in db.query(
-            "SELECT id, name, table_name, row_count FROM dataset"
-            " WHERE status = 'ready'"
+            "SELECT id, name, table_name, row_count, exclude_duplicates"
+            " FROM dataset WHERE status = 'ready'"
         )
     }
     types = {}

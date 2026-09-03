@@ -440,6 +440,57 @@ export default function Report() {
             )}
           </section>
 
+          {/* what the files repeated */}
+          {report.duplicates.sources.length > 0 && (
+            <section>
+              <p className="eyebrow">Duplicates</p>
+              <h2>What the files recorded twice</h2>
+              <p className="lede">
+                Rows repeating an event already in the same file. Marked at
+                ingest, never deleted. Whether they were counted is a decision
+                made per file, and it is stated here because the same number
+                means opposite things either way.
+              </p>
+              <div className="wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Source</th>
+                      <th className="n">Identical</th>
+                      <th className="n">Same event, new id</th>
+                      <th>Treated as</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.duplicates.sources.map((d) => (
+                      <tr key={d.dataset}>
+                        <td className="mono" style={{ fontSize: 12.5 }}>
+                          {d.dataset}
+                        </td>
+                        <td className="n">{d.identical || '—'}</td>
+                        <td className="n">{d.same_event_different_id || '—'}</td>
+                        <td className="why">
+                          {d.excluded ? (
+                            <>
+                              <span className="chip ok">set aside</span> one
+                              event recorded twice; left out of every figure
+                              above
+                            </>
+                          ) : (
+                            <>
+                              <span className="chip warn">counted</span> still in
+                              the figures, so their groups read as breaks
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
           {/* accountability */}
           <section>
             <p className="eyebrow">Accountability</p>

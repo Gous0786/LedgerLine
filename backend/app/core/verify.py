@@ -102,6 +102,10 @@ class Context:
 
     def __init__(self) -> None:
         self.tables: dict[str, str] = {}
+        # The same table, wrapped so rows excluded as duplicates are not
+        # selected -- what a rule was actually shown, rather than what the file
+        # holds.
+        self.visible: dict[str, str] = {}
         self.names: dict[str, str] = {}
         self.columns: dict[str, list[str]] = {}
         self.currency: dict[str, str | None] = {}
@@ -109,8 +113,13 @@ class Context:
         self._baselines: dict[str, timing.Baseline | None] = {}
         self._populations: dict[tuple[str, str], dict[str, int]] = {}
 
-        for d in db.query("SELECT id, name, table_name FROM dataset"):
+        for d in db.query(
+            "SELECT id, name, table_name, exclude_duplicates FROM dataset"
+        ):
             self.tables[d["id"]] = d["table_name"]
+            self.visible[d["id"]] = duplicates.filtered_source(
+                dict(d), '"' + d["table_name"].replace('"', '""') + '"'
+            )
             self.names[d["id"]] = d["name"]
             cols = db.query(
                 "SELECT column_name, inferred_type FROM dataset_column"
@@ -170,6 +179,11 @@ class Context:
         most of the rule's group keys wins. One GROUP BY then answers the
         question for every proposal the rule produced, instead of a COUNT with
         an OR across every column, per proposal, per dataset.
+       
+        Counts only rows a rule could actually have taken. A row excluded as a
+        duplicate at ingest is not evidence the rule ignored -- it is evidence
+        the rule was never shown -- and counting it would report every
+        deduplicated group as having left something behind.
         """
         cached = self._populations.get((rule, dataset_id))
         if cached is not None:
@@ -190,7 +204,8 @@ class Context:
                 try:
                     counts = sqlguard.select_all(
                         get_settings().db_path,
-                        f'SELECT "{name}" AS k, COUNT(*) AS n FROM "{table}"'
+                        f'SELECT "{name}" AS k, COUNT(*) AS n'
+                        f' FROM {self.visible.get(dataset_id, chr(34) + table + chr(34))}'
                         f' WHERE "{name}" IS NOT NULL GROUP BY "{name}"',
                     )
                 except Exception:

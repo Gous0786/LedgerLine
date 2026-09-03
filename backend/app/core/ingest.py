@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.core import duplicates
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -250,7 +251,8 @@ def ingest_csv(
             conn.execute("BEGIN")
             conn.execute(
                 f"CREATE TABLE {_quote(table)} "
-                f"({_quote(ROW_COL)} INTEGER PRIMARY KEY, {col_defs})"
+                f"({_quote(ROW_COL)} INTEGER PRIMARY KEY, {col_defs},"
+                f' "__duplicate_of" INTEGER, "__duplicate_kind" TEXT)'
             )
 
             conn.execute(
@@ -323,6 +325,12 @@ def ingest_csv(
             log.exception("ingest failed for %s", original_name)
             raise
 
+    # After the transaction that wrote the rows, because it reads them back and
+    # because a failed scan must not undo a successful ingest. A dataset whose
+    # marks are missing is merely un-deduplicated, which is what every dataset
+    # was until this existed.
+    marks = duplicates.scan(dataset_id)
+
     log.info("ingested %s -> %s (%d rows, %d cols)", original_name, table, row_count, width)
     return {
         "id": dataset_id,
@@ -332,6 +340,7 @@ def ingest_csv(
         "role": role,
         "row_count": row_count,
         "column_count": width,
+        **marks,
         "delimiter": delimiter,
         "encoding": encoding,
         "status": "ready",
