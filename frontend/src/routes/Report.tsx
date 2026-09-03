@@ -61,11 +61,20 @@ const CSS = `
 .rpt .flow { border:1px solid var(--line); border-radius:6px; background:var(--paper);
   padding:24px 22px 18px; overflow-x:auto; }
 .rpt .flow-grid { display:flex; align-items:center; gap:14px; min-width:620px; }
-.rpt .node { text-align:center; flex:0 0 auto; min-width:132px; }
+.rpt .node { text-align:center; flex:0 0 auto; min-width:158px; }
 .rpt .node .nm { font-size:11.5px; color:var(--ink); }
 .rpt .node .ct { font-size:25px; font-weight:600; line-height:1.2; margin-top:2px;
   font-variant-numeric:tabular-nums; color:var(--deep); }
 .rpt .node .of { font-size:11px; color:var(--faint); }
+.rpt .node .money { font-size:11.5px; color:var(--ink); margin-top:5px;
+  font-variant-numeric:tabular-nums; }
+.rpt .node .money .all { color:var(--faint); }
+.rpt .node .col { font-size:9.5px; color:var(--faint); margin-top:1px;
+  font-family:ui-monospace,"Cascadia Code",Consolas,monospace; }
+.rpt .node .less { font-size:10px; color:var(--warn); margin-top:3px;
+  font-variant-numeric:tabular-nums; }
+.rpt .flow-note { font-size:11.5px; color:var(--muted); margin:10px 2px 0;
+  max-width:74ch; }
 .rpt .link { flex:1 1 auto; text-align:center; min-width:140px; }
 .rpt .link .rail { height:3px; border-radius:2px; background:var(--accent); }
 .rpt .link .ends { display:flex; justify-content:space-between; gap:10px;
@@ -322,6 +331,28 @@ export default function Report() {
                         <div className="nm mono">{stage}</div>
                         <div className="ct">{d?.matched_in_any_edge ?? 0}</div>
                         <div className="of">of {d?.rows ?? 0} rows</div>
+                        {d?.value && (
+                          <>
+                            <div className="money">
+                              {money(d.value.matched_minor)}{' '}
+                              <span className="all">
+                                of {money(d.value.total_minor)}
+                              </span>
+                            </div>
+                            {/* The column is named because the figure is only
+                                checkable if you know which cells it came from,
+                                and a file can carry more than one amount. */}
+                            <div className="col">
+                              {d.value.currency ? `${d.value.currency} · ` : ''}
+                              {d.value.column}
+                            </div>
+                            {d.value.duplicate_minor > 0 && (
+                              <div className="less">
+                                less {money(d.value.duplicate_minor)} repeated
+                              </div>
+                            )}
+                          </>
+                        )}
                       </div>
                       {i < tx.stages.length - 1 && (
                         <div className="link">
@@ -339,6 +370,22 @@ export default function Report() {
                 })}
               </div>
             </div>
+
+            {cov.datasets.some((d) => (d.value?.duplicate_minor ?? 0) > 0) && (
+              <p className="flow-note">
+                Both figures leave out rows a file records twice, so the
+                smaller reads as a share of the larger.{' '}
+                {cov.datasets
+                  .filter((d) => (d.value?.duplicate_minor ?? 0) > 0)
+                  .map(
+                    (d) =>
+                      `${money(d.value!.duplicate_minor)} was removed from ${d.dataset}`,
+                  )
+                  .join('; ')}
+                {' '}— stated rather than absorbed, because a total on a close
+                report should never contain a deduction nobody can see.
+              </p>
+            )}
 
             <div style={{ height: 14 }} />
 

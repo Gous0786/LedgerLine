@@ -217,6 +217,13 @@ export interface DatasetCoverage {
   rows: number
   matched_in_any_edge: number
   matched_in_no_edge: number
+  value?: {
+    currency: string | null
+    column: string
+    matched_minor: number
+    total_minor: number
+    duplicate_minor: number
+  } | null
 }
 
 export interface EdgeCoverage {

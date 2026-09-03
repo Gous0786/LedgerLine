@@ -26,13 +26,17 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.config import get_settings
-from app.core import matching, spine, sqlguard, transactions, verify
+from app.core import duplicates, matching, spine, sqlguard, transactions, verify
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
 
 # Verification codes, in the words a reviewer would use, with the note that
 # says what the finding actually means.
+# Members sampled when recovering a file's amount column. The answer is a
+# landslide or it is wrong, so a few dozen settle it as well as all of them.
+AMOUNT_VOTES = 40
+
 CAUSE_WORDS: dict[str, tuple[str, str]] = {
     "timing_consistent": (
         "Settled outside the normal window",
@@ -206,6 +210,108 @@ def _period_and_sources() -> tuple[dict[str, str | None], list[dict[str, Any]]]:
     return period, sources
 
 
+def _q(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _dataset_value(ctx: verify.Context, dataset_id: str) -> dict[str, Any] | None:
+    """What this file is worth, and how much of that reconciled.
+
+    The amount column is not declared anywhere and must not be guessed at, so
+    it is recovered the way the verifier recovers everything: take the amounts
+    the rules actually used for this dataset, ask which cell each one came
+    from, and let the column that answers most of them win. A file whose money
+    never entered a match has no such column, and gets no figure rather than an
+    invented one.
+
+    Reported only for a single-currency file. Summing across currencies would
+    produce a number that looks like money and is not.
+    """
+    ds = db.query_one(
+        "SELECT table_name, row_count FROM dataset WHERE id = ?", (dataset_id,)
+    )
+    if not ds:
+        return None
+
+    members = db.query(
+        "SELECT row, amount_minor FROM match_member"
+        " WHERE dataset_id = ? AND amount_minor IS NOT NULL AND amount_minor <> 0"
+        " LIMIT ?",
+        (dataset_id, AMOUNT_VOTES),
+    )
+    if not members:
+        return None
+    ctx.prefetch([(dataset_id, int(m["row"])) for m in members])
+
+    votes: collections.Counter = collections.Counter()
+    for m in members:
+        row = ctx.row(dataset_id, int(m["row"]))
+        if not row:
+            continue
+        traced = verify.trace_amount(ctx, dataset_id, row, int(m["amount_minor"]))
+        if traced and traced.get("how") == "column":
+            votes[traced["expr"]] += 1
+    if not votes:
+        return None
+    # Most votes wins; ties break on the name so the same file always reports
+    # the same column. A dataset read through two edges can legitimately be
+    # counted two ways -- a gateway's gross against the ledger, its net against
+    # the bank -- and an unstable answer there would make the figure move
+    # between runs for no reason a reader could see.
+    column = min(votes.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+    code = None
+    currency_col = ctx.currency.get(dataset_id)
+    if currency_col:
+        codes = db.query(
+            f"SELECT DISTINCT {_q(currency_col)} AS c FROM {_q(ds['table_name'])}"
+            f" WHERE {_q(currency_col)} IS NOT NULL"
+        )
+        if len(codes) != 1:
+            return None  # mixed currencies: one total would be a fiction
+        code = str(codes[0]["c"]).strip().upper()
+
+    def summed(where: str, params: tuple = ()) -> int:
+        row = db.query_one(
+            f"SELECT COALESCE(SUM(CAST(ROUND(CAST({_q(column)} AS REAL) * 100)"
+            f" AS INTEGER)), 0) AS v FROM {_q(ds['table_name'])} WHERE {where}",
+            params,
+        )
+        return int((row or {}).get("v") or 0)
+
+    # Rows the file records twice are left out of both figures. A total that
+    # counts a repeated line twice overstates what the file is worth, and the
+    # two numbers have to rest on the same set of rows or the smaller one
+    # cannot be read as a share of the larger. What was removed is reported
+    # rather than absorbed, because a silent deduction is the one thing a total
+    # on a close report must never contain.
+    kept = f"{_q(duplicates.MARK_COL)} IS NULL"
+    repeated = f"{_q(duplicates.MARK_COL)} IS NOT NULL"
+
+    matched_rows = [
+        int(r["row"]) for r in db.query(
+            "SELECT DISTINCT m.row FROM match_member m"
+            " JOIN match_proposal p ON p.id = m.proposal_id"
+            " WHERE m.dataset_id = ? AND p.status = 'accepted'",
+            (dataset_id,),
+        )
+    ]
+    matched = 0
+    if matched_rows:
+        placeholders = ",".join("?" for _ in matched_rows)
+        matched = summed(
+            f"{kept} AND __row IN ({placeholders})", tuple(matched_rows)
+        )
+
+    return {
+        "currency": code,
+        "column": column,
+        "matched_minor": matched,
+        "total_minor": summed(kept),
+        "duplicate_minor": summed(repeated),
+    }
+
+
 def _value_by_currency(ctx: verify.Context) -> dict[str, dict[str, int]]:
     """Money reconciled, still open, and not tying -- per currency.
 
@@ -361,6 +467,8 @@ def build() -> dict[str, Any]:
 
     status = matching.reconciliation_status()
     datasets = [{k: v for k, v in d.items() if k != "examples"} for d in status["datasets"]]
+    for d in datasets:
+        d["value"] = _dataset_value(ctx, d["dataset_id"])
     edges = [
         {"edge": e["edge"],
          "sides": [{k: v for k, v in s.items() if k != "unmatched_examples"}
