@@ -8,6 +8,7 @@
 
 import { RouterProvider, useRouter } from '@/app/router'
 import Home from '@/routes/Home'
+import Report from '@/routes/Report'
 import Upload from '@/routes/Upload'
 import Workspace from '@/routes/Workspace'
 import { ChatProvider } from '@/state/ChatContext'
@@ -18,6 +19,7 @@ function Screen() {
   const { route } = useRouter()
   if (route === '/upload') return <Upload />
   if (route === '/workspace') return <Workspace />
+  if (route === '/report') return <Report />
   return <Home />
 }
 

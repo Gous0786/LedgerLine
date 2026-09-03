@@ -8,9 +8,9 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
-export type Route = '/' | '/upload' | '/workspace'
+export type Route = '/' | '/upload' | '/workspace' | '/report'
 
-const ROUTES: Route[] = ['/', '/upload', '/workspace']
+const ROUTES: Route[] = ['/', '/upload', '/workspace', '/report']
 
 function currentPath(): Route {
   const path = window.location.pathname as Route

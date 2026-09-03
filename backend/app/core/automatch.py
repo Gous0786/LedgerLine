@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import get_settings
-from app.core import discovery, matching, sqlguard
+from app.core import discovery, embedded, matching, sqlguard
 from app.db import connection as db
 
 log = logging.getLogger(__name__)
@@ -256,6 +256,33 @@ def _numeric_text_columns(dataset_id: str, source: str) -> list[str]:
     return out
 
 
+def _usable_pair(pair: dict[str, Any], types: dict[tuple[str, str], str],
+                 min_coverage: float) -> bool:
+    """Whether a discovered column pair is a key this pass can build a rule on.
+
+    Both sides must be text -- an amount that happens to be equal on both sides
+    is a coincidence to verify, never a key to group by -- and one side must be
+    meaningfully covered by the other.
+    """
+    if types.get((pair["left_dataset"], pair["left_column"])) != "TEXT":
+        return False
+    if types.get((pair["right_dataset"], pair["right_column"])) != "TEXT":
+        return False
+    return max(pair["left_coverage"], pair["right_coverage"]) >= min_coverage
+
+
+def _has_column(source: str, column: str) -> bool:
+    """Whether a table or view actually exposes a column, rather than assuming."""
+    try:
+        sqlguard.select_all(
+            get_settings().db_path,
+            f"SELECT {_quote(column)} FROM {source} LIMIT 0",
+        )
+    except Exception:
+        return False
+    return True
+
+
 def _side(dataset: dict[str, Any], key: str, view: str | None) -> Side | None:
     source = _quote(view) if view else _quote(dataset["table_name"])
     p = get_settings().db_path
@@ -278,7 +305,7 @@ def _side(dataset: dict[str, Any], key: str, view: str | None) -> Side | None:
     # those rows are not reconcilable anyway.
     for name in _numeric_text_columns(dataset["id"], source):
         exprs.append((name, 'CAST({a}.' + _quote(name) + " AS REAL)"))
-    if view:
+    if view and _has_column(source, "signed_amount"):
         exprs.append(("signed_amount", '{a}.' + _quote("signed_amount")))
     return Side(
         dataset=dataset, key=key, source=source, exprs=exprs,
@@ -548,7 +575,8 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
     """Run the deterministic pass across every discovered join key."""
     datasets = {
         d["name"]: d for d in db.query(
-            "SELECT id, name, table_name FROM dataset WHERE status = 'ready'"
+            "SELECT id, name, table_name, row_count FROM dataset"
+            " WHERE status = 'ready'"
         )
     }
     types = {}
@@ -562,20 +590,39 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
         name: normalised_view(d) for name, d in datasets.items()
     }
     normalised = {n: v for n, v in views.items() if v}
+    embedded_keys: list[embedded.Extraction] = []
 
     pairs = discovery.find_join_candidates()["pairs"]
+
+    # Keys buried inside a text column -- a bank narration carrying an order
+    # reference -- share no whole value with anything, so the overlap matrix
+    # above cannot see them. Resolving them republishes the reference as a real
+    # column, and from here on it is an ordinary key like any other.
+    # "Already linked" has to mean linked by a key this pass would actually
+    # use. Discovery also returns amount-column overlaps -- a bank credit equal
+    # to a gateway net -- which are dropped below for the good reason that an
+    # amount is not a key. Counting those as a link skips the embedded probe on
+    # precisely the pair that has no usable key at all.
+    linked = {
+        frozenset((p["left_dataset_id"], p["right_dataset_id"]))
+        for p in pairs if _usable_pair(p, types, min_coverage)
+    }
+    for found in embedded.find(list(datasets.values()), already_linked=linked):
+        published = embedded.publish(found, source=views.get(found.carrier["name"]))
+        if not published:
+            continue
+        views[published.carrier["name"]] = published.view
+        types[(published.carrier["name"], published.column_name)] = "TEXT"
+        pairs.append(embedded.as_pair(published))
+        embedded_keys.append(published)
 
     # one rule per dataset pair -- the strongest key wins
     strongest: dict[tuple[str, str], dict[str, Any]] = {}
     for p in pairs:
+        if not _usable_pair(p, types, min_coverage):
+            continue
         left, right = p["left_dataset"], p["right_dataset"]
-        if types.get((left, p["left_column"])) != "TEXT":
-            continue
-        if types.get((right, p["right_column"])) != "TEXT":
-            continue
         score = max(p["left_coverage"], p["right_coverage"])
-        if score < min_coverage:
-            continue
         key = tuple(sorted((left, right)))
         if key not in strongest or score > strongest[key]["_score"]:
             strongest[key] = {**p, "_score": score}
@@ -592,7 +639,15 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
         if left is None or right is None:
             continue
 
-        join_label = f"{left.name}.{left.key} = {right.name}.{right.key}"
+        # An extracted key is named for where it came from, not just what it is
+        # called. `bank.order_ref` is not a column anyone can open the file and
+        # find; saying so here carries the provenance into the rule
+        # description, and from there into the proposal, the report and
+        # anything else that quotes the rule.
+        left_label = f"{left.name}.{left.key}"
+        if p.get("embedded_in"):
+            left_label += f" (read from {left.name}.{p['embedded_in']})"
+        join_label = f"{left_label} = {right.name}.{right.key}"
 
         # --- what kind of relationship is this? --------------------------
         left_one = left.is_one_against(right)
@@ -624,6 +679,26 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
         # --- how does the money line up? ---------------------------------
         if shape == "1:1":
             amounts = pair_row_level(left, right)
+            if amounts is None and p.get("embedded_in"):
+                # A key two files both declare as a column is evidence in its
+                # own right. A key recovered from inside free text is an
+                # inference, and an inference must not create matches nobody
+                # can check -- so it has to be corroborated by the money.
+                # Without that, a narration mentioning an order number is
+                # enough to claim the payment settled, which is exactly the
+                # claim being reconciled.
+                declined.append({
+                    "join": join_label,
+                    "shape": shape,
+                    "reason": (
+                        f"{left.name}.{p['embedded_in']} carries"
+                        f" {right.name}.{p['right_column']}, but no amount"
+                        " relationship holds between the two. A key read out of"
+                        " free text is only trustworthy when the amounts"
+                        " corroborate it, so nothing is proposed."
+                    ),
+                })
+                continue
             rule = f"auto_exact__{left.name}__{right.name}"
             sql = _sql_row_level(left, right, amounts)
             tolerance = 0
@@ -713,6 +788,20 @@ def auto_match_exact(min_coverage: float = MIN_COVERAGE) -> dict[str, Any]:
     }
     if normalised:
         out["normalised_views"] = normalised
+    if embedded_keys:
+        # Worth saying out loud rather than leaving as an unexplained column:
+        # a reader who does not know a key was pulled out of a narration cannot
+        # judge whether the resulting matches are trustworthy.
+        out["embedded_keys"] = [
+            {
+                "found": e.describe(),
+                "published_as": f"{e.view}.{e.column_name}",
+                "resolved": e.resolved,
+                "ambiguous_rows_dropped": e.ambiguous,
+                "of_rows": e.rows,
+            }
+            for e in embedded_keys
+        ]
     if declined:
         # Surfaced, not buried in a log: a declined edge is the most useful
         # thing this pass produces, because it is the part that needs a person.

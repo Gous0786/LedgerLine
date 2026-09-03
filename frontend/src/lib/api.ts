@@ -245,6 +245,54 @@ export function setProposalStatusBatch(
   })
 }
 
+export interface CloseReport {
+  generated_at: string
+  checksum: string
+  run: { id: string; title: string; started_at: string; finished_at: string } | null
+  model: string
+  period: { from: string | null; to: string | null }
+  sources: { name: string; rows: number; columns: number; bytes: number; from: string | null; to: string | null }[]
+  value: Record<string, { reconciled?: number; open?: number; residual?: number }>
+  coverage: {
+    datasets: DatasetCoverage[]
+    edges: EdgeCoverage[]
+    totals: { rows: number; matched: number; unmatched: number }
+  }
+  transactions: {
+    spine: string | null
+    spine_reason?: string
+    stages: string[]
+    counts: Record<string, number>
+    total: number
+    examples: { key: string; state: string; reason: string | null }[]
+  }
+  exceptions: {
+    cause: string
+    code: string
+    groups: number | null
+    rows?: number
+    value_minor: number | null
+    note: string
+  }[]
+  decisions: {
+    proposed: number
+    auto_released: number
+    human_accepted: number
+    rejected: number
+    overridden: number
+    held: number
+    open: number
+    accepted_total: number
+  }
+  verification: { verified: number; passed: number; failed: number }
+  rules: { rule: string; status: string; approved_by: string | null; proposals: number; description: string | null }[]
+  limits: { title: string; note: string }[]
+}
+
+export function getReport() {
+  return request<CloseReport>('/report')
+}
+
 export interface RuleTrust {
   rule: string
   status: 'unproven' | 'trusted' | 'retired'

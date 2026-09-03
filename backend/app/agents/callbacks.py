@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 # measured runs show it does anyway, which is the same reason confidence is
 # computed here rather than requested from the model.
 #
-# Generous on purpose: auto_match_exact now returns coverage and leftovers in
+# Generous on purpose: run_reconciliation returns coverage and leftovers in
 # one result, so what remains is a handful of questions about specific breaks.
 EXPLORE_BUDGET = 6
 
@@ -57,14 +57,20 @@ MAX_TOOL_RESULT_CHARS = 6_000
 # worse than one that shows a few.
 MIN_KEPT_ITEMS = 3
 
-_explored: contextvars.ContextVar[int] = contextvars.ContextVar(
-    "recon_explore_calls", default=0
+# The counter is a mutable box, not an int, and that is load-bearing. ADK
+# dispatches each tool call inside `asyncio.create_task` / `copy_context()`,
+# and a copied context shares object *references* but not *rebindings*: an int
+# incremented with `.set()` is discarded when the task ends, so every call
+# reads back 1 and the budget never binds. Handing every copied context the
+# same dict is what makes the count accumulate across a turn at all.
+_explored: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+    "recon_explore_calls", default=None
 )
 
 
 def begin_turn() -> None:
     """Reset the per-turn exploration budget."""
-    _explored.set(0)
+    _explored.set({"n": 0})
 
 
 def _size(payload: Any) -> int:
@@ -181,8 +187,15 @@ def before_tool(
     if name not in EXPLORATORY:
         return None
 
-    spent = _explored.get() + 1
-    _explored.set(spent)
+    counter = _explored.get()
+    if counter is None:
+        # No turn was opened, so this is a direct call or a test rather than an
+        # agent turn. Counting from zero here would make the budget depend on
+        # who happened to call the tool.
+        return None
+
+    counter["n"] += 1
+    spent = counter["n"]
     if spent <= EXPLORE_BUDGET:
         return None
 
@@ -194,7 +207,7 @@ def before_tool(
         "budget": EXPLORE_BUDGET,
         "note": (
             "Stop investigating and answer now with what you already have."
-            " auto_match_exact's result already carries coverage and the"
+            " run_reconciliation's result already carries coverage and the"
             " unmatched examples. Reporting what is unresolved is a complete"
             " answer; it does not need to be explained row by row."
         ),

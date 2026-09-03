@@ -26,7 +26,7 @@ import { resetSession } from '@/lib/api'
 export default function Workspace() {
   const { go } = useRouter()
   const { datasets, refresh: refreshDatasets } = useDatasets()
-  const { refresh: refreshProposals } = useProposals()
+  const { summary, refresh: refreshProposals } = useProposals()
   const { clearChat } = useChatState()
   const [expanded, setExpanded] = useState(false)
   const [resetting, setResetting] = useState(false)
@@ -59,6 +59,14 @@ export default function Workspace() {
         </span>
 
         <div className="ml-auto flex items-center gap-2">
+          {/* Only once there is something to report on -- an empty close report
+              is a worse answer than no button. */}
+          {(summary?.by_status.accepted ?? 0) > 0 && (
+            <button onClick={() => go('/report')} className="btn btn-quiet">
+              <Icon.report size={13} />
+              Close report
+            </button>
+          )}
           <button onClick={() => go('/upload')} className="btn btn-quiet">
             <Icon.upload size={13} />
             Add source

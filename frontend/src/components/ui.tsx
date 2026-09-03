@@ -50,6 +50,18 @@ export const Icon = {
       <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" />
     </svg>
   ),
+  download: ({ size = 16, ...p }: IconProps) => (
+    <svg {...base(size)} {...p}>
+      <path d="M12 4v12M7 11l5 5 5-5" />
+      <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" />
+    </svg>
+  ),
+  report: ({ size = 16, ...p }: IconProps) => (
+    <svg {...base(size)} {...p}>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 3v5h5M9 13h6M9 17h4" />
+    </svg>
+  ),
   sheet: ({ size = 16, ...p }: IconProps) => (
     <svg {...base(size)} {...p}>
       <rect x="4" y="3" width="16" height="18" rx="2" />

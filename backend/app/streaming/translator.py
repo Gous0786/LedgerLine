@@ -66,8 +66,12 @@ async def translate(
     started = time.perf_counter()
 
     text_id: str | None = None
+    # This id is the whole state of the reasoning block: set means open, None
+    # means closed. It used to be shadowed by a second "is it open" flag, and
+    # the two drifted -- closing the block cleared the flag but kept the id, so
+    # a model that thought again after speaking addressed its deltas to a part
+    # the client had already ended, and the stream was rejected.
     reasoning_id: str | None = None
-    reasoning_open = False
     streamed_text = False
     streamed_reasoning = False
     final_text = ""
@@ -162,7 +166,6 @@ async def translate(
                     if is_partial:
                         if reasoning_id is None:
                             reasoning_id = uuid.uuid4().hex
-                            reasoning_open = True
                             yield p.reasoning_start(reasoning_id)
                         yield p.reasoning_delta(reasoning_id, text)
                         reasoning_buf.append(text)
@@ -175,13 +178,14 @@ async def translate(
                 if is_partial:
                     # Thinking is done once prose starts; close it so the UI
                     # settles the block instead of leaving it spinning.
-                    if reasoning_open and reasoning_id is not None:
+                    if reasoning_id is not None:
                         yield p.reasoning_end(reasoning_id)
                         runlog.event(
                             "reasoning", {"text": "".join(reasoning_buf)}, agent=author
                         )
                         reasoning_buf.clear()
-                        reasoning_open = False
+                        # Cleared so the next thought opens its own part.
+                        reasoning_id = None
                     if text_id is None:
                         text_id = uuid.uuid4().hex
                         yield p.text_start(text_id)
@@ -199,7 +203,6 @@ async def translate(
             yield p.reasoning_delta(reasoning_id, final_reasoning)
             yield p.reasoning_end(reasoning_id)
             runlog.event("reasoning", {"text": final_reasoning}, agent=last_author)
-            reasoning_open = False
             reasoning_id = None
 
         if not streamed_text and final_text:
@@ -216,7 +219,7 @@ async def translate(
         yield p.error(_explain(exc))
 
     finally:
-        if reasoning_open and reasoning_id is not None:
+        if reasoning_id is not None:
             yield p.reasoning_end(reasoning_id)
             runlog.event("reasoning", {"text": "".join(reasoning_buf)}, agent=last_author)
         if text_id is not None:

@@ -29,6 +29,22 @@ OPEN_STATUSES = ("pending", "accepted", "review_later")
 SETTLED = ("exact", "within_tolerance", "high")
 
 
+def _distinctness(dataset_id: str, column: str) -> float:
+    """Distinct values per row -- how well the column tells transactions apart."""
+    row = db.query_one("SELECT table_name FROM dataset WHERE id = ?", (dataset_id,))
+    if not row:
+        return 0.0
+    q = '"' + column.replace('"', '""') + '"'
+    table = '"' + row["table_name"].replace('"', '""') + '"'
+    try:
+        stat = db.query_one(
+            f"SELECT COUNT({q}) n, COUNT(DISTINCT {q}) d FROM {table}"
+        )
+    except Exception:
+        return 0.0
+    return ((stat["d"] or 0) / stat["n"]) if stat and stat["n"] else 0.0
+
+
 def _label_column(dataset_id: str) -> str | None:
     """The column that names a transaction across sources.
 
@@ -38,7 +54,12 @@ def _label_column(dataset_id: str) -> str | None:
     `merchant_order_id` is what the processor and bank also carry -- and what a
     duplicate-payment break has two rows of.
 
-    So pick the column with the widest measured overlap into other datasets.
+    So pick on two counts, because either one alone picks the wrong column.
+    Overlap says the column is shared; distinctness says it identifies a row.
+    A posting date scores perfect overlap -- every date in one ledger appears
+    in the other -- while naming five transactions at once, and a private
+    primary key is perfectly distinct while appearing nowhere else. Only the
+    product prefers the reference that is both.
     """
     from app.core import discovery
 
@@ -53,9 +74,9 @@ def _label_column(dataset_id: str) -> str | None:
             if pair[f"{side}_dataset"] != name:
                 continue
             col = pair[f"{side}_column"]
-            cov = pair[f"{side}_coverage"]
-            if best is None or cov > best[0]:
-                best = (cov, col)
+            score = pair[f"{side}_coverage"] * _distinctness(dataset_id, col)
+            if best is None or score > best[0]:
+                best = (score, col)
     if best:
         return best[1]
 
