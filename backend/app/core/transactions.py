@@ -14,6 +14,7 @@ uses them, labelled, rather than merging those chains together.
 from __future__ import annotations
 
 import collections
+import json
 import logging
 from typing import Any
 
@@ -162,6 +163,37 @@ def _break_reason(hops: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _hold_reason(legs: list[dict[str, Any]]) -> str | None:
+    """Why a transaction that ties has still not been released.
+
+    Every hop agreeing and the chain still sitting open is the least
+    self-explanatory state in the whole view -- it looks like nothing happened.
+    What actually happened is that verification refused a leg, and the reason it
+    refused is already recorded, so it is quoted rather than paraphrased.
+    """
+    ids = [x["proposal_id"] for x in legs if x.get("status") != "accepted"]
+    if not ids:
+        return None
+    placeholders = ",".join("?" for _ in ids)
+    rows = db.query(
+        f"SELECT invariants FROM verification WHERE status = 'fail'"
+        f" AND proposal_id IN ({placeholders}) ORDER BY id DESC LIMIT 1",
+        tuple(ids),
+    )
+    if not rows:
+        return "waiting on a decision"
+    try:
+        failed = [
+            i for i in json.loads(rows[0]["invariants"] or "[]")
+            if i.get("passed") is False
+        ]
+    except Exception:
+        return "waiting on a decision"
+    if not failed:
+        return "waiting on a decision"
+    return "held: " + failed[0].get("detail", failed[0].get("code", "verification failed"))
+
+
 def build(spine_dataset_id: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> dict[str, Any]:
     """Group every proposal into per-transaction chains, plus what is left over."""
     spine_ds = db.query_one("SELECT * FROM dataset WHERE id = ?", (spine_dataset_id,))
@@ -278,8 +310,12 @@ def build(spine_dataset_id: str, statuses: tuple[str, ...] = OPEN_STATUSES) -> d
             {
                 "key": label,
                 "hops": hops,
-                "reason": _break_reason(hops) if state in ("exception", "incomplete",
-                                                           "unmatched") else None,
+                "reason": (
+                    _break_reason(hops)
+                    if state in ("exception", "incomplete", "unmatched")
+                    else _hold_reason(legs) if state == "pending"
+                    else None
+                ),
                 "spine_row": info["row"],
                 "data": info["data"],
                 "state": state,

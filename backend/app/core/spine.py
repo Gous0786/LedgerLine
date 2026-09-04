@@ -111,87 +111,152 @@ def _earliest_event(dataset_id: str, table_name: str) -> str | None:
 def precedence() -> list[tuple[str, str, int, int]]:
     """Which source's rows come first, compared *within a match*.
 
-    The earlier version took each source's median timestamp and ranked them.
-    That compares different populations, and on a sampled dataset it inverts:
-    the bank rows happened to cluster in an earlier fortnight than the orders,
-    so the statement landed on "settlements start a transaction", and every
-    chain read backwards.
+    The first version took each source's median timestamp and ranked them. That
+    compares different populations, and on a sampled dataset it inverts: the
+    bank rows happened to cluster in an earlier fortnight than the orders, so
+    the statement landed on "settlements start a transaction" and every chain
+    read backwards.
 
-    Joining first fixes it, because then both sides are the *same*
-    transactions. Measured on that dataset the signal is not merely better, it
-    is unambiguous: internal precedes processor in 261 of 261 matched rows, and
-    processor precedes bank in 250 of 250.
+    Comparing inside a match fixes it, because then both sides are the *same*
+    transactions. Two things that took a second inversion to get right:
+
+    *   The pairs come from the groups that were actually matched, not from
+        discovery's candidate list. An edge found through a key extracted from
+        free text has no candidate pair to iterate, so it was invisible here
+        while being one of the two real hops.
+    *   A tie is not evidence. Counting "not strictly earlier" as "later" made
+        a join on `posting_date = value_date` -- where the two timestamps are
+        the same value by construction -- report unanimously that the bank
+        precedes the ledger, and put the statement at the head of the flow.
+        Rows whose timestamps are equal are now simply not counted.
 
     Returns `(earlier_id, later_id, agreeing_rows, compared_rows)`.
     """
-    datasets = {d["name"]: d for d in db.query(
-        "SELECT id, name, table_name FROM dataset WHERE status = 'ready'"
-    )}
+    datasets = {
+        d["id"]: d for d in db.query(
+            "SELECT id, name, table_name FROM dataset WHERE status = 'ready'"
+        )
+    }
     stamps = {
-        d["id"]: [
+        ds_id: [
             c["column_name"] for c in db.query(
                 "SELECT column_name FROM dataset_column WHERE dataset_id = ?"
                 " AND inferred_type IN ('DATE','TIMESTAMP') ORDER BY ordinal",
-                (d["id"],),
+                (ds_id,),
             )
         ]
-        for d in datasets.values()
+        for ds_id in datasets
     }
+
+    # Which datasets actually share a group, and how often.
+    together = db.query(
+        "SELECT a.dataset_id AS left_id, b.dataset_id AS right_id,"
+        " COUNT(*) AS n FROM match_member a"
+        " JOIN match_member b ON b.proposal_id = a.proposal_id"
+        "  AND b.dataset_id > a.dataset_id"
+        " GROUP BY 1, 2"
+    )
 
     p = get_settings().db_path
     edges: list[tuple[str, str, int, int]] = []
-    for pair in discovery.find_join_candidates()["pairs"]:
-        left, right = datasets.get(pair["left_dataset"]), datasets.get(pair["right_dataset"])
+    for pair in together:
+        left, right = datasets.get(pair["left_id"]), datasets.get(pair["right_id"])
         if not left or not right:
             continue
-        best: tuple[int, int] | None = None
+        best: tuple[int, int, int] | None = None
         for lts in stamps.get(left["id"], []):
             for rts in stamps.get(right["id"], []):
+                iso = "'[0-9][0-9][0-9][0-9]-*'"
                 sql = (
-                    f'SELECT COUNT(*) AS n,'
-                    f' SUM(CASE WHEN l."{lts}" < r."{rts}" THEN 1 ELSE 0 END) AS earlier'
-                    f' FROM "{left["table_name"]}" l'
-                    f' JOIN "{right["table_name"]}" r'
-                    f'   ON r."{pair["right_column"]}" = l."{pair["left_column"]}"'
-                    # Only ISO-shaped values: anything else does not sort as text,
-                    # and a DD/MM column would rank by day of month.
-                    f' WHERE l."{lts}" GLOB \'[0-9][0-9][0-9][0-9]-*\''
-                    f'   AND r."{rts}" GLOB \'[0-9][0-9][0-9][0-9]-*\''
+                    f'SELECT'
+                    f' SUM(CASE WHEN l."{lts}" < r."{rts}" THEN 1 ELSE 0 END) AS l_first,'
+                    f' SUM(CASE WHEN r."{rts}" < l."{lts}" THEN 1 ELSE 0 END) AS r_first'
+                    f' FROM match_member ma'
+                    f' JOIN match_member mb ON mb.proposal_id = ma.proposal_id'
+                    f"  AND mb.dataset_id = '{right['id']}'"
+                    f' JOIN "{left["table_name"]}" l ON l.__row = ma.row'
+                    f' JOIN "{right["table_name"]}" r ON r.__row = mb.row'
+                    f" WHERE ma.dataset_id = '{left['id']}'"
+                    # Only ISO-shaped values: anything else does not sort as
+                    # text, and a DD/MM column would rank by day of month.
+                    f'   AND l."{lts}" GLOB {iso}'
+                    f'   AND r."{rts}" GLOB {iso}'
                 )
                 try:
                     row = sqlguard.select_all(p, sql)[0]
                 except Exception:
                     continue
-                n = row["n"] or 0
-                if n < MIN_PAIR_ROWS:
+                l_first = row["l_first"] or 0
+                r_first = row["r_first"] or 0
+                decided = l_first + r_first
+                if decided < MIN_PAIR_ROWS:
                     continue
-                if best is None or n > best[1]:
-                    best = (row["earlier"] or 0, n)
+                if best is None or decided > best[2]:
+                    best = (l_first, r_first, decided)
         if best is None:
             continue
-        earlier, n = best
-        if earlier / n >= PRECEDENCE_AGREEMENT:
-            edges.append((left["id"], right["id"], earlier, n))
-        elif (n - earlier) / n >= PRECEDENCE_AGREEMENT:
-            edges.append((right["id"], left["id"], n - earlier, n))
+        l_first, r_first, decided = best
+        if l_first / decided >= PRECEDENCE_AGREEMENT:
+            edges.append((left["id"], right["id"], l_first, decided))
+        elif r_first / decided >= PRECEDENCE_AGREEMENT:
+            edges.append((right["id"], left["id"], r_first, decided))
     return edges
 
 
-def _ordered_by_precedence(edges: list[tuple[str, str, int, int]]) -> list[str] | None:
-    """Sources in flow order: fewest things preceding them first."""
+def adjacency() -> dict[str, set[str]]:
+    """Which datasets share a matched group, in either direction."""
+    out: dict[str, set[str]] = {}
+    for r in db.query(
+        "SELECT DISTINCT a.dataset_id AS x, b.dataset_id AS y FROM match_member a"
+        " JOIN match_member b ON b.proposal_id = a.proposal_id"
+        "  AND b.dataset_id <> a.dataset_id"
+    ):
+        out.setdefault(r["x"], set()).add(r["y"])
+        out.setdefault(r["y"], set()).add(r["x"])
+    return out
+
+
+def _ordered_by_precedence(
+    edges: list[tuple[str, str, int, int]],
+    neighbours: dict[str, set[str]] | None = None,
+) -> list[str] | None:
+    """Sources in flow order: fewest things preceding them first.
+
+    Timing orders the sources it can, and topology places the rest. A pair whose
+    timestamps are the same value -- an order posted and captured on one day --
+    yields no direction at all, and a source that appears in no dated pair used
+    to drop out of this graph entirely and be appended after it, which put a hop
+    in the chain view that no rule had ever produced.
+
+    So every source that shares a match is a node here whether or not time
+    separated it, and ties break on how many neighbours it has. That is not
+    arbitrary: transactions begin at an *end* of the chain, and the source
+    joined to everything is its hub, not its head.
+    """
     if not edges:
         return None
+    # Worked out here rather than demanded of callers: this function has two of
+    # them, and passing it at one but not the other is exactly how the chain
+    # view came to draw a hop its own spine did not believe in.
+    neighbours = adjacency() if neighbours is None else neighbours
     before: dict[str, set[str]] = {}
     for earlier, later, _, _ in edges:
         before.setdefault(later, set()).add(earlier)
         before.setdefault(earlier, set())
+    # Anything that shares a match belongs in the ordering even when nothing
+    # dated it, or it is silently dropped from the flow.
+    for node, near in neighbours.items():
+        if before.keys() & ({node} | near):
+            before.setdefault(node, set())
     # Transitive closure, so a three-stage chain orders correctly rather than
     # relying on the two edges happening to be discovered in order.
     for _ in range(len(before)):
         for node, preds in before.items():
             for p in list(preds):
                 preds |= before.get(p, set()) - {node}
-    return sorted(before, key=lambda n: (len(before[n]), n))
+    return sorted(
+        before, key=lambda n: (len(before[n]), len(neighbours.get(n, ())), n)
+    )
 
 
 def infer_spine() -> dict[str, Any]:

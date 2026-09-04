@@ -5,10 +5,13 @@
  */
 
 import { useRouter } from '@/app/router'
+import { AgentDiagram, RuleEngineDiagram } from '@/components/Diagrams'
 import { Icon, Logo, Pill } from '@/components/ui'
 
 const NAV = [
   { label: 'How it works', href: '#how' },
+  { label: 'Architecture', href: '#architecture' },
+  { label: 'Rule engine', href: '#engine' },
   { label: 'What it checks', href: '#checks' },
 ]
 
@@ -114,6 +117,29 @@ export default function Home() {
               </article>
             ))}
           </div>
+        </section>
+
+        {/* architecture */}
+        <section id="architecture" className="scroll-mt-8 pb-24">
+          <h2 className="eyebrow mb-2">Architecture</h2>
+          <p className="mb-6 max-w-[62ch] text-[13px] leading-relaxed text-muted">
+            One agent, six tools, and a deterministic core it cannot bypass. The
+            model decides what to look at and how to say it; the arithmetic
+            happens in SQL, on your rows, every time.
+          </p>
+          <AgentDiagram />
+        </section>
+
+        {/* rule engine */}
+        <section id="engine" className="scroll-mt-8 pb-24">
+          <h2 className="eyebrow mb-2">The rule engine</h2>
+          <p className="mb-6 max-w-[62ch] text-[13px] leading-relaxed text-muted">
+            What runs when you say “reconcile it” — before any model is asked
+            anything. Given the same files it gives the same answer, which is why
+            this, and not the conversation, is what gets scored against labelled
+            data.
+          </p>
+          <RuleEngineDiagram />
         </section>
 
         {/* checks */}
