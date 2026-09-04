@@ -179,7 +179,7 @@ class Context:
         most of the rule's group keys wins. One GROUP BY then answers the
         question for every proposal the rule produced, instead of a COUNT with
         an OR across every column, per proposal, per dataset.
-       
+
         Counts only rows a rule could actually have taken. A row excluded as a
         duplicate at ingest is not evidence the rule ignored -- it is evidence
         the rule was never shown -- and counting it would report every
@@ -349,12 +349,11 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
         " WHERE proposal_id = ? ORDER BY dataset_id, row",
         (proposal_id,),
     )
-    # A member flagged as duplicating another row of the same source keeps its
-    # recorded amount so a reviewer can see what the duplicated line claims,
-    # but it was excluded from the group's sum when the group was built. The
-    # verifier has to use the same rule or it re-adds the amount and rejects
-    # every batch the exclusion just corrected.
-    counted = [m for m in members if duplicates.counts_toward_balance(m)]
+    # A member flagged as duplicating another row of the same source still
+    # counts: rows kept out of a group are kept out at the source, so anything
+    # that reached this one belongs in its sum. The flag is for the reviewer,
+    # and the resulting break is the finding.
+    counted = members
     duplicated = [m for m in members if m["duplicate_of"] is not None]
     ctx.prefetch([(m["dataset_id"], int(m["row"])) for m in members])
 
@@ -571,10 +570,8 @@ def check(proposal_id: int, ctx: Context | None = None) -> dict[str, Any]:
         invariants.append(_inv(
             "duplicate_rows_excluded", None,
             f"{len(duplicated)} member(s) duplicate another row of the same"
-            f" source: {named}"
-            + ("; excluded from the sum"
-               if duplicates.EXCLUDE_DUPLICATE_AMOUNTS
-               else "; still counted, so the group's residual reflects them"),
+            f" source: {named}; still counted, so the group's residual"
+            f" reflects them",
         ))
 
     # 9. did the rule leave evidence behind? -------------------------------

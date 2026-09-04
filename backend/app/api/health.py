@@ -17,5 +17,5 @@ async def health() -> dict:
         "db": str(s.db_path),
         "schema_version": (versions or {}).get("v"),
         "openrouter_key_present": bool(s.openrouter_api_key),
-        "models": {"orchestrator": s.model_orchestrator, "worker": s.model_worker},
+        "model": s.model_orchestrator,
     }

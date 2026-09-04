@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import api_router
 from app.config import get_settings
+from app.core import duplicates
 from app.db import connection as db
 from app.db.migrate import migrate
 
@@ -32,6 +33,11 @@ async def lifespan(app: FastAPI):
     db.configure(settings.db_path)
     applied = migrate()
     log.info("db ready at %s (applied: %s)", settings.db_path, applied or "none")
+
+    # Files uploaded before duplicate marking existed carry no marks. Backfill
+    # them once here rather than making every later read wonder whether the
+    # answer is "none" or "never looked".
+    await db.run(duplicates.scan_missing)
 
     if not settings.openrouter_api_key:
         log.warning("OPENROUTER_API_KEY is not set - model calls will fail")

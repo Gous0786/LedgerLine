@@ -377,8 +377,11 @@ def propose_matches(
                 m["duplicate_of"] = canonical
                 counts["duplicate_members_flagged"] += 1
 
-        counted = [m for m in members if duplicates.counts_toward_balance(m)]
-        amounts = [m["amount_minor"] for m in counted]
+        # Every member counts. Rows a file repeats are kept out at the source
+        # when its policy says to, so anything that reached this group is there
+        # because it should be -- including a duplicate the policy left in,
+        # whose whole point is to make the group fail to balance.
+        amounts = [m["amount_minor"] for m in members]
         has_amounts = bool(amounts) and all(a is not None for a in amounts)
         balance = int(sum(int(a) for a in amounts)) if has_amounts else None
 
@@ -598,7 +601,7 @@ def _duplicate_note(
         "amount_minor": amount,
         "balance_without_duplicates_minor": without,
         "explains_residual": explains,
-        "counted": duplicates.EXCLUDE_DUPLICATE_AMOUNTS is False,
+        "counted": True,
         "rows": [
             {"dataset": m["dataset"], "row": m["row"],
              "duplicate_of": m["duplicate_of"], "amount_minor": m["amount_minor"]}

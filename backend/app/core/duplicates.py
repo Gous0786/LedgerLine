@@ -76,20 +76,6 @@ MIN_REFERENCE_RATIO = 0.5
 NUMERIC_TYPES = ("REAL", "INTEGER")
 
 
-# Does a duplicated row that reached matching still count toward its balance?
-#
-# Yes, and the module docstring says why: on a dataset nobody has opted in for,
-# a duplicate is a finding rather than an error in the arithmetic, and the
-# break has to stay visible. On a dataset that has opted in, the row never
-# reaches matching at all, so this question does not arise for it.
-EXCLUDE_DUPLICATE_AMOUNTS = False
-
-
-def counts_toward_balance(member: dict[str, Any]) -> bool:
-    """Should this member's amount be added to the group's sum?"""
-    return not (EXCLUDE_DUPLICATE_AMOUNTS and member.get("duplicate_of") is not None)
-
-
 def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
@@ -232,11 +218,22 @@ def scan(dataset_id: str) -> dict[str, int]:
     return {"duplicate_rows": exact, "near_duplicate_rows": near}
 
 
-def scan_all() -> dict[str, dict[str, int]]:
-    return {
-        d["id"]: scan(d["id"])
-        for d in db.query("SELECT id FROM dataset WHERE status = 'ready'")
-    }
+def scan_missing() -> dict[str, dict[str, int]]:
+    """Scan datasets ingested before marking existed.
+
+    Their tables carry no mark columns, so they would report no duplicates for
+    ever and break the moment someone turned the policy on. Detected by the
+    absent column rather than by a zero count, since zero duplicates is also a
+    perfectly good answer.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for d in db.query("SELECT id, table_name FROM dataset WHERE status = 'ready'"):
+        have = {r["name"] for r in db.query(f"PRAGMA table_info({_quote(d['table_name'])})")}
+        if MARK_COL not in have:
+            out[d["id"]] = scan(d["id"])
+    if out:
+        log.info("scanned %d dataset(s) ingested before duplicate marking", len(out))
+    return out
 
 
 def excluded_kinds(dataset: dict[str, Any]) -> tuple[str, ...]:
@@ -259,6 +256,11 @@ def filtered_source(dataset: dict[str, Any], source: str) -> str:
     duplicates exist.
     """
     kinds = excluded_kinds(dataset)
+    if not kinds:
+        # Nothing to filter, so do not mention the mark columns at all. An
+        # empty `NOT IN ()` happens to be legal in SQLite and nowhere else, and
+        # a table ingested before the marks existed has no such column to name.
+        return source
     quoted = ",".join(f"'{k}'" for k in kinds)
     return (
         f"(SELECT * FROM {source} WHERE {_quote(KIND_COL)} IS NULL"
@@ -319,10 +321,3 @@ def summary(dataset_id: str) -> dict[str, Any]:
             pass
     return out
 
-
-def all_redundant() -> dict[str, dict[int, int]]:
-    """Every ready dataset's redundant rows, keyed by dataset id."""
-    return {
-        d["id"]: redundant_rows(d["id"])
-        for d in db.query("SELECT id FROM dataset WHERE status = 'ready'")
-    }

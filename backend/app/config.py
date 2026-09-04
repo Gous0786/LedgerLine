@@ -66,7 +66,6 @@ class Settings(BaseSettings):
     model_fallbacks: list[str] = []
 
     model_orchestrator: str = "openrouter/stealth/ox-alpha"
-    model_worker: str = "openrouter/stealth/ox-alpha"
 
     def ensure_dirs(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

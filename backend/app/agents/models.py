@@ -64,6 +64,3 @@ def model(model_id: str) -> LiteLlm:
 def orchestrator_model() -> LiteLlm:
     return model(get_settings().model_orchestrator)
 
-
-def worker_model() -> LiteLlm:
-    return model(get_settings().model_worker)
