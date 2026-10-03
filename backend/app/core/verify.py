@@ -297,6 +297,13 @@ def trace_amount(
     claim about the data, and that is the part which has to be true.
     """
     target = abs(Decimal(int(target_minor)))
+    if target == 0:
+        # Nothing legitimately produces a zero leg, and a zero is exactly what
+        # COALESCE(col, 0) leaves behind when the column was empty. Checked
+        # before the cells: any row holding a zero somewhere (a fee, a flag)
+        # would otherwise "trace" it.
+        return None
+
     cells: list[tuple[str, Decimal]] = []
     for c in ctx.columns.get(dataset_id, []):
         m = to_minor(data.get(c))
@@ -312,11 +319,6 @@ def trace_amount(
         raw = data.get(c)
         if isinstance(raw, int) and not isinstance(raw, bool) and abs(raw) == target:
             return {"how": "column_minor_units", "expr": c}
-
-    if target == 0:
-        # Nothing legitimately produces a zero leg, and a zero is exactly what
-        # COALESCE(col, 0) leaves behind when the column was empty.
-        return None
 
     if len(cells) <= MAX_PAIR_COLUMNS:
         for i, (lc, lm) in enumerate(cells):

@@ -133,6 +133,11 @@ Two details that cost real accuracy when missing:
 - Candidates are ranked by **coverage first**, then agreement. A partition on a
   single refund type ties perfectly across four rows and would otherwise beat an
   aggregate that correctly explains ninety.
+- Only a row with a non-empty, non-zero value on both sides can agree, and a
+  candidate whose agreeing values never vary is discarded. Otherwise a
+  `merchant_id` that is the same on every row, or a discount that is zero on
+  nearly every row, out-agrees the real amount — and the verifier then finds
+  that value in that cell and passes it.
 
 ## 6 · Confidence
 
@@ -195,8 +200,18 @@ otherwise never reach the group and the transaction would read as clean.
 
 `matching.release()` is the single door to `accepted`, and it requires three
 things at once: confidence is `exact`, verification passed, **and** the rule is
-trusted. A new rule stays pending until a human approves it once — confidence
-alone once let an unscoped rule finalise matches nobody had asked for.
+trusted. A new agent-written rule stays pending until a human approves it once —
+confidence alone once let an unscoped rule finalise matches nobody had asked
+for. Rules `auto_match_exact` writes are trusted on sight: their scope is the
+whole dataset, so there is no question for them to exceed.
+
+Trust belongs to a rule's **SQL**, not its name. Approval is stored against a
+hash of the query, a different query under an approved name is refused, and
+the `auto_` prefix is reserved for the automatic pass.
+
+A rejection is never overturned by a machine. A group a person rejected is not
+proposed again under the same rule, and any group built from rows a person
+rejected waits for review instead of releasing, however exact it is.
 
 A person may override a failed verification with `force`, and the override is
 recorded as one. The close report has a line for it even when the count is zero,

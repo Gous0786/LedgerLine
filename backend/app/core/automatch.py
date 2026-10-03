@@ -386,6 +386,12 @@ def _score(row: dict[str, Any] | None) -> tuple[float, int, int, int] | None:
     n = row["n"] or 0
     if n < MIN_AMOUNT_ROWS:
         return None
+    # A column that agrees on a single value is not an amount, whatever the
+    # ratio says. A `merchant_id` or `qty` that is the same on every row agrees
+    # perfectly -- better than a real amount column on a set with exceptions --
+    # and the verifier will then find that value in that cell and pass it.
+    if (row["spread"] or 0) < 2:
+        return None
     near = row["near_n"] or 0
     agreement = near / n
     if agreement < AMOUNT_AGREEMENT:
@@ -396,12 +402,17 @@ def _score(row: dict[str, Any] | None) -> tuple[float, int, int, int] | None:
 
 
 def _probe_row_level(left: Side, right: Side, le: str, re_: str, extra: str = "") -> str:
+    # Only a row with a value on both sides, and a non-zero one, can agree.
+    # Two empty cells, or two zeros, say nothing about whether the columns hold
+    # the same quantity -- yet counted as agreement they let a mostly-empty or
+    # mostly-zero column (a discount, a fee) outscore the real amount.
+    lv, rv = _alias(le, "l"), _alias(re_, "r")
     return (
-        f"SELECT COUNT(*) n,"
-        f" SUM(CASE WHEN ABS(d) < 0.005 THEN 1 ELSE 0 END) exact_n,"
-        f" SUM(CASE WHEN ABS(d) < 0.005 THEN 1 ELSE 0 END) near_n,"
-        f" 0 AS worst FROM ("
-        f"SELECT COALESCE({_alias(le, 'l')},0) - COALESCE({_alias(re_, 'r')},0) AS d"
+        f"SELECT COUNT(*) n, SUM(ok) exact_n, SUM(ok) near_n, 0 AS worst,"
+        f" COUNT(DISTINCT CASE WHEN ok = 1 THEN ROUND(v, 2) END) spread FROM ("
+        f"SELECT {lv} AS v, CASE WHEN {lv} IS NOT NULL AND {rv} IS NOT NULL"
+        f"  AND ABS({lv}) >= 0.005 AND ABS({lv} - {rv}) < 0.005"
+        f"  THEN 1 ELSE 0 END AS ok"
         f" FROM {left.source} l JOIN {right.source} r"
         f"  ON r.{_quote(right.key)} = l.{_quote(left.key)}{extra})"
     )
@@ -442,13 +453,21 @@ def pair_aggregate(one: Side, many: Side) -> Amounts | None:
     best: tuple[tuple[float, int, int], str, str, str, str] | None = None
     for olabel, oe in one.exprs:
         for mlabel, me in many.exprs:
+            # As in the row-level probe: the one side's value has to be there,
+            # and be non-zero, before its agreeing with a sum means anything.
+            ov = _alias(oe, "o")
             probe = (
                 f"SELECT COUNT(*) n,"
-                f" SUM(CASE WHEN ABS(d) < 0.005 THEN 1 ELSE 0 END) exact_n,"
-                f" SUM(CASE WHEN ABS(d) <= {MAX_RESIDUAL} THEN 1 ELSE 0 END) near_n,"
-                f" MAX(CASE WHEN ABS(d) <= {MAX_RESIDUAL} THEN ABS(d) ELSE 0 END) worst"
-                f" FROM (SELECT COALESCE({_alias(oe, 'o')},0)"
-                f"  - SUM(COALESCE({_alias(me, 'm')},0)) AS d"
+                f" SUM(CASE WHEN live AND ABS(d) < 0.005 THEN 1 ELSE 0 END) exact_n,"
+                f" SUM(CASE WHEN live AND ABS(d) <= {MAX_RESIDUAL} THEN 1 ELSE 0 END)"
+                f"  near_n,"
+                f" MAX(CASE WHEN live AND ABS(d) <= {MAX_RESIDUAL} THEN ABS(d) ELSE 0 END)"
+                f"  worst,"
+                f" COUNT(DISTINCT CASE WHEN live AND ABS(d) <= {MAX_RESIDUAL}"
+                f"  THEN ROUND(v, 2) END) spread"
+                f" FROM (SELECT {ov} AS v,"
+                f"  ({ov} IS NOT NULL AND ABS({ov}) >= 0.005) AS live,"
+                f"  COALESCE({ov},0) - SUM(COALESCE({_alias(me, 'm')},0)) AS d"
                 f"  FROM {one.source} o JOIN {many.source} m"
                 f"   ON m.{_quote(many.key)} = o.{_quote(one.key)}"
                 f"  WHERE o.{_quote(one.key)} IS NOT NULL"

@@ -97,7 +97,7 @@ flowchart LR
 | Result cap | `after_tool` | 6,000 chars, longest list trimmed first |
 | Model calls | ADK runner | 40 per turn |
 | SQL | `sqlguard` | read-only handle, single select only |
-| Rule trust | `matching.release` | a new rule stays pending until approved once |
+| Rule trust | `matching.release` | a new rule stays pending until approved once; approval is pinned to its SQL, and `auto_*` names are reserved |
 
 `run_reconciliation` is exempt from the budget in both modes. The refusal text
 is written to be *actionable* — it tells the model to answer with what it has,

@@ -22,6 +22,7 @@ pointers. Nothing in this file writes `accepted` without it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -59,6 +60,9 @@ AUTO_ACCEPTABLE = (EXACT,)
 # still has to pass verification like any other.
 SYSTEM = "system"
 AGENT = "agent"
+# Names `auto_match_exact` gives its rules. Reserved, so nothing else can run a
+# query under one.
+SYSTEM_PREFIX = "auto_"
 
 
 
@@ -108,14 +112,94 @@ def rule_status(rule: str) -> str:
     return row["status"] if row else "unproven"
 
 
-def _register_rule(rule: str, author: str = AGENT) -> None:
-    """Record the rule, trusting it only if the system wrote it."""
-    status = "trusted" if author == SYSTEM else "unproven"
-    db.execute(
-        "INSERT INTO rule_trust (rule, status, approved_at, approved_by)"
-        " VALUES (?, ?, CASE WHEN ? = 'trusted' THEN datetime('now') END, ?)"
-        " ON CONFLICT(rule) DO NOTHING",
-        (rule, status, status, author),
+def _rejected_groups(rule: str) -> set[tuple[str, frozenset[tuple[str, int]]]]:
+    """Groups a person already rejected under this rule, by key and members.
+
+    Members as well as the key: a re-uploaded file keeps its name, so the same
+    rule and key can come back holding different rows, and that is a new group
+    a person has not looked at.
+    """
+    rows = db.query(
+        "SELECT p.id, p.group_key, m.dataset_id, m.row FROM match_proposal p"
+        " JOIN match_member m ON m.proposal_id = p.id"
+        " WHERE p.rule = ? AND p.status = 'rejected'",
+        (rule,),
+    )
+    by_id: dict[int, tuple[str, set[tuple[str, int]]]] = {}
+    for r in rows:
+        by_id.setdefault(r["id"], (r["group_key"], set()))[1].add(
+            (r["dataset_id"], int(r["row"]))
+        )
+    return {(key, frozenset(members)) for key, members in by_id.values()}
+
+
+def _rejected_rows() -> dict[str, set[tuple[str, int]]]:
+    """Rows inside any rejected proposal, keyed by edge like `_claimed_rows`.
+
+    A rejection is a person's judgement about those rows. A different rule
+    regrouping them may well be right, but it does not get to overrule that
+    judgement on its own: the group waits for a person instead of releasing.
+    """
+    rows = db.query(
+        "SELECT m.dataset_id, m.row, p.datasets FROM match_member m"
+        " JOIN match_proposal p ON p.id = m.proposal_id"
+        " WHERE p.status = 'rejected'"
+    )
+    out: dict[str, set[tuple[str, int]]] = {}
+    for r in rows:
+        out.setdefault(r["datasets"] or "", set()).add((r["dataset_id"], int(r["row"])))
+    return out
+
+
+def _sql_hash(sql: str) -> str:
+    # Whitespace-insensitive, nothing more: two queries that differ in any
+    # token are different scopes until someone looks.
+    return hashlib.sha256(" ".join(sql.split()).encode("utf-8")).hexdigest()
+
+
+def _register_rule(rule: str, sql: str, author: str = AGENT) -> None:
+    """Record the rule against its SQL, trusting it only if the system wrote it.
+
+    Trust attaches to the (name, SQL) pair. Keyed on the name alone, any query
+    submitted under a trusted name -- a system rule's, which the agent is shown,
+    or one a person approved -- released its exact groups with no one having
+    seen that query.
+    """
+    if author != SYSTEM and rule.startswith(SYSTEM_PREFIX):
+        raise MatchError(
+            f"rule names starting with {SYSTEM_PREFIX!r} are reserved for the"
+            " automatic pass; choose another name"
+        )
+    digest = _sql_hash(sql)
+    row = db.query_one("SELECT status, sql_hash FROM rule_trust WHERE rule = ?", (rule,))
+    if row is None:
+        status = "trusted" if author == SYSTEM else "unproven"
+        db.execute(
+            "INSERT INTO rule_trust (rule, status, approved_at, approved_by, sql_hash)"
+            " VALUES (?, ?, CASE WHEN ? = 'trusted' THEN datetime('now') END, ?, ?)",
+            (rule, status, status, author, digest),
+        )
+        return
+    if row["sql_hash"] == digest:
+        return
+    if author == SYSTEM:
+        # The automatic pass re-measured the data and wrote different SQL. Its
+        # scope is still the data, which is why it was trusted on sight.
+        db.execute("UPDATE rule_trust SET sql_hash = ? WHERE rule = ?", (digest, rule))
+        return
+    if row["sql_hash"] is None:
+        # Recorded before SQL was. Nothing says this is the query that was
+        # approved, so it starts again as unproven.
+        db.execute(
+            "UPDATE rule_trust SET sql_hash = ?,"
+            " status = CASE WHEN status = 'trusted' THEN 'unproven' ELSE status END"
+            " WHERE rule = ?",
+            (digest, rule),
+        )
+        return
+    raise MatchError(
+        f"rule {rule!r} already exists with different SQL. Approval belongs to a"
+        " rule's query, not its name -- use a new rule name for a new query."
     )
 
 
@@ -275,11 +359,13 @@ def propose_matches(
         )
 
     tolerance_minor = max(0, int(tolerance_minor or 0))
-    _register_rule(rule, author)
+    _register_rule(rule, sql, author)
     trusted = rule_status(rule) == "trusted"
 
     lookup = _dataset_lookup()
     claimed = _claimed_rows()
+    rejected_groups = _rejected_groups(rule)
+    rejected_rows = _rejected_rows()
     # One scan per dataset, reused across every group this rule produces.
     redundant: dict[str, dict[int, int]] = {}
     seen_keys = _existing_group_keys(rule)
@@ -337,6 +423,8 @@ def propose_matches(
         "flagged_by_verification": 0,
         "duplicate_members_flagged": 0,
         "skipped_already_matched": 0,
+        "skipped_previously_rejected": 0,
+        "held_previously_rejected": 0,
         "skipped_duplicate": 0,
         "skipped_single_member": 0,
     }
@@ -362,6 +450,14 @@ def propose_matches(
         if any((m["dataset_id"], m["row"]) in claimed.get(edge, ()) for m in members):
             counts["skipped_already_matched"] += 1
             continue
+        # A person already said no to exactly this group. Proposing it again
+        # would put it back in the queue on every run -- or, from a trusted
+        # rule, accept it outright and overturn the rejection.
+        member_set = frozenset((m["dataset_id"], m["row"]) for m in members)
+        if (key, member_set) in rejected_groups:
+            counts["skipped_previously_rejected"] += 1
+            continue
+        touches_rejected = not member_set.isdisjoint(rejected_rows.get(edge, ()))
 
         # --- a row the source file recorded twice --------------------------
         # Always marked, so the reviewer sees two rows as one event recorded
@@ -402,7 +498,11 @@ def propose_matches(
         # An exact tie on a trusted rule reconciles itself. Everything else --
         # a tolerance, an ambiguity, a group that does not balance -- waits,
         # and even this still has to get past the verifier below.
-        eligible = confidence in AUTO_ACCEPTABLE and trusted
+        # Nor does a group built from rows a person rejected elsewhere: a new
+        # grouping may be right, but that is theirs to say.
+        eligible = confidence in AUTO_ACCEPTABLE and trusted and not touches_rejected
+        if confidence in AUTO_ACCEPTABLE and trusted and touches_rejected:
+            counts["held_previously_rejected"] += 1
 
         # Always lands pending. Even an eligible group is written unaccepted
         # first, because the verifier reads it back out of the database and

@@ -113,6 +113,7 @@ cd backend
 uv run python -m tests.test_duplicates
 uv run python -m tests.test_embedded_keys
 uv run python -m tests.test_translator_reasoning
+uv run python -m tests.test_release_gate
 ```
 
 They run themselves because the project has no test runner installed, and work
