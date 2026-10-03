@@ -7,10 +7,12 @@
  */
 
 import { RouterProvider, useRouter } from '@/app/router'
+import WakeNotice from '@/components/WakeNotice'
 import Home from '@/routes/Home'
 import Report from '@/routes/Report'
 import Upload from '@/routes/Upload'
 import Workspace from '@/routes/Workspace'
+import { BackendProvider } from '@/state/BackendContext'
 import { ChatProvider } from '@/state/ChatContext'
 import { DatasetsProvider } from '@/state/DatasetsContext'
 import { ProposalsProvider } from '@/state/ProposalsContext'
@@ -25,14 +27,17 @@ function Screen() {
 
 export default function App() {
   return (
-    <DatasetsProvider>
-      <ChatProvider>
-        <ProposalsProvider>
-          <RouterProvider>
-            <Screen />
-          </RouterProvider>
-        </ProposalsProvider>
-      </ChatProvider>
-    </DatasetsProvider>
+    <BackendProvider>
+      <DatasetsProvider>
+        <ChatProvider>
+          <ProposalsProvider>
+            <RouterProvider>
+              <Screen />
+              <WakeNotice />
+            </RouterProvider>
+          </ProposalsProvider>
+        </ChatProvider>
+      </DatasetsProvider>
+    </BackendProvider>
   )
 }

@@ -7,7 +7,7 @@ import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, BinaryIO
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
@@ -53,6 +53,18 @@ async def list_datasets() -> list[dict]:
     )
 
 
+def _copy_capped(src: BinaryIO, dst: BinaryIO, limit: int) -> None:
+    """Copy an upload, refusing it once it passes `limit` bytes."""
+    written = 0
+    while chunk := src.read(64 * 1024):
+        written += len(chunk)
+        if written > limit:
+            raise ingest.IngestError(
+                f"file is larger than the demo's {limit // (1024 * 1024)} MB limit"
+            )
+        dst.write(chunk)
+
+
 @router.post("/upload")
 async def upload(files: Annotated[list[UploadFile], File()]) -> dict[str, Any]:
     """Ingest one or more CSVs. Each file is independent -- one bad file does
@@ -69,7 +81,10 @@ async def upload(files: Annotated[list[UploadFile], File()]) -> dict[str, Any]:
 
         try:
             with stored.open("wb") as out:
-                shutil.copyfileobj(upload_file.file, out)
+                if settings.demo_mode:
+                    _copy_capped(upload_file.file, out, settings.demo_max_upload_bytes)
+                else:
+                    shutil.copyfileobj(upload_file.file, out)
 
             result = await db.run(
                 ingest.ingest_csv, stored, name=stem, original_name=original

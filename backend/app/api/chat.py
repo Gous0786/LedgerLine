@@ -15,6 +15,8 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from app.agents import runner as agent_runner
+from app.config import get_settings
+from app.core import demo
 from app.streaming import protocol as p
 from app.streaming.sse import ui_message_stream
 from app.streaming.translator import translate
@@ -45,17 +47,33 @@ def _last_user_text(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
-async def _empty_prompt():
+async def _refuse(message: str):
     yield p.start()
-    yield p.error("No message text received.")
+    yield p.error(message)
     yield p.finish(reason="error")
+
+
+def _visitor(request: Request) -> str:
+    # Behind a hosting proxy every request comes from the proxy; the visitor is
+    # the first address it forwarded for.
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 @router.post("/chat")
 async def chat(body: ChatRequest, request: Request):
     prompt = _last_user_text(body.messages)
     if not prompt:
-        return ui_message_stream(_empty_prompt(), request)
+        return ui_message_stream(_refuse("No message text received."), request)
+
+    # Refused as a stream, not an HTTP error, so the chat panel shows the
+    # reason in place of a generic failure.
+    if get_settings().demo_mode:
+        refused = demo.limiter().check(_visitor(request))
+        if refused:
+            return ui_message_stream(_refuse(refused), request)
 
     # The chat id keys the ADK session, so history survives across turns.
     session_id = body.id or "default"

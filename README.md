@@ -59,6 +59,56 @@ the close report, which you can download as a single HTML file.
 For demo data, run `uv run python ../demo/load.py` from `backend/`. It wipes the
 database and loads the three files in `demo/data/`.
 
+## Deploying a public demo
+
+The frontend goes on **Vercel** and the backend on **Render**, both on free
+plans.
+
+Render's free plan puts the backend to sleep after 15 idle minutes, and waking
+it takes up to a minute. To hide most of that wait, the frontend pings
+`/api/health` as soon as any page loads (`state/BackendContext.tsx`). While the
+backend wakes, it shows a small "starting the demo server" notice, and data
+loads once the backend answers.
+
+**Backend: Render.** The `Dockerfile` runs the backend with `DEMO_MODE=true`,
+which:
+
+- loads the sample files on startup, and again after a reset;
+- limits chat to 8 turns per visitor per hour and 150 per day in total
+  (`DEMO_CHAT_PER_IP_PER_HOUR`, `DEMO_CHAT_PER_DAY`);
+- refuses uploads over 2 MB (`DEMO_MAX_UPLOAD_BYTES`).
+
+The database lives inside the container, so it starts fresh every time the
+backend wakes up.
+
+1. In Render, choose **New → Blueprint** and pick this repo. It reads
+   `render.yaml`.
+2. Fill in `OPENROUTER_API_KEY`, `MODEL_ORCHESTRATOR` (a cheap model that
+   supports tool calling), and `CORS_ORIGINS`, your Vercel URL as a JSON list:
+   `["https://ledgerline.vercel.app"]`.
+
+**Frontend: Vercel.**
+
+1. Import the repo and set **Root Directory** to `frontend`. Vercel detects
+   Vite.
+2. Add the environment variable `VITE_API_URL` with your Render URL, e.g.
+   `https://ledgerline-api.onrender.com`. It's read at build time, so redeploy
+   after changing it.
+
+Both redeploy on every push to `main`.
+
+> There's no login. Set a **spending limit on your OpenRouter key** before
+> sharing the link.
+
+To run the backend container locally:
+
+```bash
+docker build -t ledgerline .
+docker run -p 7860:7860 -e OPENROUTER_API_KEY=... ledgerline
+```
+
+It also serves the built frontend, so <http://localhost:7860> is the whole app.
+
 ## Stack
 
 | Layer | Choice |

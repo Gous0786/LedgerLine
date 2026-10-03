@@ -137,5 +137,11 @@ are no exchange rates anywhere in the system.
 - **Any website open in your browser can call the API.** `POST
   /api/session/reset` (which wipes all data) and file uploads need no special
   headers, so CORS doesn't block them. Run Ledgerline only on your own
-  machine.
-- **It's a local analysis tool, not a deployed service.**
+  machine, or as the public demo below.
+- **Demo mode is a showcase, not multi-user support.** With `DEMO_MODE=true`,
+  chat is rate-limited and uploads are capped. But every visitor still shares
+  one database, so one person's reset or upload affects everyone. The limits
+  are kept in memory, so they reset on restart, and the per-visitor limit goes
+  by IP address. The OpenRouter spending limit is the only hard cap on cost.
+- **The free backend sleeps.** On Render's free plan, the first visit after 15
+  idle minutes waits up to a minute, and all data resets at that point.

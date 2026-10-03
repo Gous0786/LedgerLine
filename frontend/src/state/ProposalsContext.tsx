@@ -7,6 +7,7 @@
  */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { useBackend } from '@/state/BackendContext'
 import {
   getCoverage,
   listProposals,
@@ -70,14 +71,12 @@ export function ProposalsProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
+  // Pull once the backend is up, and again whenever the agent stops working --
+  // that is when new proposals exist.
+  const { ready } = useBackend()
   useEffect(() => {
-    void refresh()
-  }, [refresh])
-
-  // Pull once the agent stops working -- that is when new proposals exist.
-  useEffect(() => {
-    if (!agentBusy) void refresh()
-  }, [agentBusy, refresh])
+    if (ready && !agentBusy) void refresh()
+  }, [ready, agentBusy, refresh])
 
   const act = useCallback(
     async (id: number, status: ProposalStatus) => {

@@ -12,6 +12,7 @@ import { useChat } from '@ai-sdk/react'
 import { DefaultChatTransport } from 'ai'
 import type { ChatStatus } from 'ai'
 import type { MetricsData, ReconUIMessage } from '@/types/stream'
+import { API_BASE } from '@/lib/api'
 
 export interface MetricTotals {
   calls: number
@@ -53,7 +54,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [metrics, setMetrics] = useState<MetricTotals>(ZERO)
 
   const { messages, sendMessage, setMessages, status, error, stop } = useChat<ReconUIMessage>({
-    transport: new DefaultChatTransport({ api: '/api/chat' }),
+    transport: new DefaultChatTransport({ api: `${API_BASE}/chat` }),
     onData: (part) => {
       if (part.type === 'data-metrics') {
         const d = part.data as MetricsData

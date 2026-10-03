@@ -1,6 +1,7 @@
 /** Uploaded CSVs, shared between the top tab strip and the data workspace. */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { useBackend } from '@/state/BackendContext'
 import {
   deleteDataset,
   listDatasets,
@@ -49,9 +50,12 @@ export function DatasetsProvider({ children }: { children: React.ReactNode }) {
     }
   }, [load])
 
+  // Wait for the backend: on a sleeping host the first request is the wake-up,
+  // and loading before then would only show an error.
+  const { ready } = useBackend()
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    if (ready) void refresh()
+  }, [ready, refresh])
 
   const upload = useCallback(
     async (files: FileList | File[]) => {

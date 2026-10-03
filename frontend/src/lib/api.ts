@@ -1,5 +1,9 @@
-/** Backend base path. Vite proxies /api → http://127.0.0.1:8000 in dev. */
-export const API_BASE = '/api'
+/**
+ * Backend base path. In development Vite proxies /api → http://127.0.0.1:8000.
+ * When the frontend is hosted apart from the backend, set VITE_API_URL at
+ * build time to the backend's origin, e.g. https://ledgerline.onrender.com.
+ */
+export const API_BASE = `${(import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')}/api`
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, init)

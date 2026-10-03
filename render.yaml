@@ -1,0 +1,23 @@
+# Render blueprint for the backend (free plan).
+# Render → New → Blueprint → pick this repo. It asks for the values marked
+# `sync: false` when the service is created.
+services:
+  - type: web
+    name: ledgerline-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DEMO_MODE
+        value: "true"
+      - key: OPENROUTER_API_KEY
+        sync: false
+      # A cheap OpenRouter model that supports tool calling, written as
+      # openrouter/<vendor>/<model> (see openrouter.ai/models)
+      - key: MODEL_ORCHESTRATOR
+        sync: false
+      # The Vercel URL, as a JSON list: ["https://ledgerline.vercel.app"]
+      - key: CORS_ORIGINS
+        sync: false

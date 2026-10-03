@@ -67,6 +67,22 @@ class Settings(BaseSettings):
 
     model_orchestrator: str = "openrouter/stealth/ox-alpha"
 
+    # -- public demo ----------------------------------------------------
+    # For a deployment anyone can open. There is no login, so the limits below
+    # are what stand between a stranger and the OpenRouter bill. Set a spending
+    # limit on the key as well; these counters live in memory and restart with
+    # the process.
+    demo_mode: bool = False
+    demo_data_dir: Path = BACKEND_ROOT.parent / "demo" / "data"
+    demo_chat_per_ip_per_hour: int = 8
+    demo_chat_per_day: int = 150
+    demo_max_upload_bytes: int = 2 * 1024 * 1024
+
+    # The built frontend (`npm run build`). Served from `/` when present, so a
+    # deployment is one process on one port. Absent in local development,
+    # where Vite serves it instead.
+    frontend_dist: Path = BACKEND_ROOT.parent / "frontend" / "dist"
+
     def ensure_dirs(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
