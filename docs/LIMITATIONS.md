@@ -1,148 +1,141 @@
-# Known limitations
+# Limitations and known issues
 
-Stated because the rest is only credible if the gaps are named. Each entry says
-what the system does, not merely what it lacks, so you can judge whether it
-matters for your data.
+This page lists what Ledgerline doesn't do, where it can mislead you, and bugs
+we know about but haven't fixed. Read it before trusting a result on real data.
+
+---
+
+## Known bugs
+
+These are confirmed in the code and still open.
+
+- **Files with more than 10,000 distinct values in a column can't be
+  reconciled.** `discovery._distinct_values` asks for up to 50,000 values
+  (`DISTINCT_CAP`), but `sqlguard.select_all` raises an error past 10,000 rows
+  (`HARD_ROW_CAP`) instead of stopping there. Discovery fails, and auto-matching
+  fails with it. The same 10,000-row limit hits a matching rule's SQL (about
+  5,000 rows per side for a 1:1 join) and the chain view (more than 10,000 rows
+  in the starting file).
+- **Rows with the wrong number of fields are silently fixed up.** Short rows
+  are padded with blanks and extra fields are dropped (`ingest.py`), with no
+  warning. An unquoted `1,234.50` in a comma-separated file shifts every later
+  column, so the stored amount is wrong and verification agrees with it.
+- **Some common amount formats are stored as text.** Indian digit grouping
+  (`1,23,456.00`), currency symbols (`₹1,200`), amounts in brackets (`(50.00)`)
+  and `CR`/`DR` suffixes aren't recognised as numbers, so automatic matching
+  can't use the column. The verifier *does* understand these formats, so the
+  two disagree.
+- **The file encoding is guessed from the first 64 KB only.** If that slice
+  ends in the middle of a multi-byte character, a UTF-8 file can be read as
+  cp1252. Characters like `₹` are then garbled, and text ids containing them
+  stop matching.
+- **Report totals are overstated for multi-step flows.** Each match adds its
+  value again, so an order matched to the gateway and the gateway matched to
+  the bank is counted twice. Rejected matches are also counted as "open".
+- **Transaction chains reach only one step beyond the starting file.** In a
+  four-file flow, the later steps show as missing even when they're matched.
+- **A file name with a quote in it breaks matching.** Dataset names are put
+  into the generated SQL without escaping, so `O'Brien.csv` causes a SQL error
+  for every rule on that file.
 
 ---
 
 ## Currency
 
-**Value is never converted and never summed across currencies.** Each currency
-stands alone in the report, and there is no FX rate anywhere in the system.
+**Amounts are never converted between currencies or added across them.** There
+are no exchange rates anywhere in the system.
 
-The consequences on a multi-currency dataset are worth being precise about:
+- A group with members in two currencies fails the `currency_uniform` check and
+  can't be approved. It stays an exception.
+- The report files a group's value under the currency of its **first** member
+  that has one. For a mixed-currency group, that choice is arbitrary.
+- If a file has more than one currency, the report shows no money total for
+  it. Adding across currencies would give a meaningless number.
 
-- A group whose members span two currencies fails the `currency_uniform`
-  invariant and cannot be released. This is deliberate — the amounts are not
-  comparable — but it means such groups accumulate as exceptions rather than
-  resolving.
-- The report attributes a group's value to the currency of the **first member
-  carrying one**. For a mixed-currency group that choice is arbitrary, so its
-  open value appears under one code rather than being split. The group is
-  already an exception, but the currency it is filed under should not be read as
-  meaningful.
-- **Per-dataset totals disappear for a mixed-currency file.** The transaction
-  flow shows a money figure per source only when that file has a single
-  currency; summing across currencies would produce a number that looks like
-  money and is not, so it is omitted rather than invented.
-- Exceptions counted as "mixed currency in one group" are counted, not priced.
-  Their value sits inside the open figures.
+## Input files
 
-The report is deterministic — the same database always produces the same
-report — but *deterministic is not the same as complete*, and multi-currency is
-where the gap is widest.
+- **CSV only.** There's no support for Excel, JSON, Parquet, databases or bank
+  APIs. An `.xlsx` file renamed to `.csv` won't load.
+- **No incremental uploads.** Uploading a file again creates a new dataset; it
+  doesn't add to or replace the old one. There's no concept of carrying a
+  period close forward.
+- **No upload size limit**, and a large upload holds the request open while
+  it's processed. There's no background job queue.
 
-## Sources
+## What matching can't check
 
-**CSV only.** Upload accepts delimited text, which is sniffed for delimiter and
-encoding and typed per column. There is no reader for Excel, JSON, Parquet, a
-database connection or a bank API. A `.xlsx` renamed to `.csv` will fail to
-parse rather than being converted.
-
-**No incremental ingest.** Re-uploading a file creates a new dataset rather than
-appending to or updating the existing one. There is no notion of a period close
-that carries forward.
-
-## What matching cannot check
-
-**Fee amounts.** A group whose gross amounts tie is reported as exact even when
-the fee is wrong. No fee policy is known to the system, so fee errors pass
-silently. This is the single most likely source of a "clean" reconciliation that
-should not have been.
-
-**Timing against a contract.** "Late" means far outside the lag this dataset
-itself exhibits — learned from the rule's own groups — not a breach of any
-agreed settlement window. A processor that is uniformly two days late looks
-perfectly on time.
-
-**Many-to-many relationships are declined, not solved.** Where neither side of a
-join is unique enough to be the `one`, the pass says so and proposes nothing.
-Any group built there would fan out into a blob no amount could verify. Such
-edges need a hand-written rule via `run_reconciliation({"mode": "rule", ...})`.
-
-**Same identifier, different amounts** is a conflict rather than a duplicate,
-and there is no safe way to pick which of the two is true. It stays an
-exception.
+- **Fees.** If the gross amounts match, the group is `exact` even when the fee
+  is wrong. Ledgerline doesn't know anyone's fee rates. This is the most likely
+  way a "clean" result is actually wrong.
+- **Contractual settlement times.** "Late" means far outside the delay seen in
+  this same data, not a breach of an agreed deadline. A provider that is
+  always two days late looks on time.
+- **N:M links are skipped, not solved.** When neither side is unique enough to
+  be the "one", nothing is proposed. Write a rule by hand with
+  `run_reconciliation({"mode": "rule", ...})`.
+- **The amount column can still be picked wrongly.** Constant columns and
+  mostly-empty or mostly-zero columns are rejected. But a column with only a
+  few values (like a quantity of 1 to 3), or a numeric id present in both
+  files, can still agree more often than the real amount.
+- **Amounts assume two decimal places.** Minor units are always the amount
+  × 100, which is wrong for currencies with three decimals (KWD, BHD).
+- **Same id, different amounts** is an exception, not a duplicate. There's no
+  safe way to choose which row is right.
 
 ## Duplicates
 
-**Detection of near-duplicates needs an identifiable row.** A file where no
-column stands out as identifying the row — nothing clears
-`IDENTITY_FLOOR = 0.5` — gets byte-identical detection only. A file whose
-repeated rows also share their id is caught by exact detection instead, so the
-gap is narrow, but it exists.
+- **Near-duplicate detection needs an id column.** If no column is at least
+  50% distinct (`IDENTITY_FLOOR`), only exact duplicates are detected.
+- **Duplicates are kept in the sums by default.** Turn on exclusion per file
+  only when you know repeats in that file are export errors. See
+  [RULE-ENGINE.md](RULE-ENGINE.md#1-duplicate-rows) for why this is the
+  default.
 
-**Exclusion is off by default and is a per-file judgement.** Nothing is removed
-from any sum until someone says that a repeat in this file is a recording
-artefact. That default is measured: releasing deduplicated groups automatically
-turned real exceptions into silent auto-matches on the labelled fixtures — 100%
-accuracy down to 81.7%, false auto-matches 0% to 19.3%.
+## References inside text
 
-## Embedded keys
+- **The search is skipped for very large file pairs.** It compares every row
+  with every row, so it doesn't run above 40 million row pairs (`MAX_PRODUCT`).
+  The skip is logged.
+- **Prefix matches can create false links.** The search checks whether a key
+  appears anywhere inside the text. A narration containing `pay_ABC123` can
+  link to `pay_ABC12` when `pay_ABC123` isn't in the other file.
+- **A row that mentions two references links to neither.**
+- **An extracted column isn't in your file.** Rule descriptions say where it
+  came from, for example `bank.order_ref (read from bank.narration)`.
 
-**Containment is a nested loop**, capped at `MAX_PRODUCT = 40,000,000` row
-pairs. Above that the probe is skipped and logged; a large bank statement against
-a large processor file may not get its embedded key found.
+## The report
 
-**A row naming two references resolves to NULL** and stays unmatched. Guessing
-which one was meant would put a fabricated link into a reconciliation.
+- **The checksum covers matching decisions, not the source files.** It detects
+  the reconciliation changing. It doesn't detect a CSV being edited and
+  uploaded again.
+- **A file matched in two ways can have two possible totals.** For example, a
+  gateway file can be matched on gross against the ledger and on net against
+  the bank. The report picks the column most matches used, and prints which
+  column it chose.
+- **The report period comes only from `DATE` and `TIMESTAMP` columns.** One
+  bad value makes a date column text, and then it's ignored.
+- **A file with no matched amounts gets no money figure.**
 
-**An extracted column is not in your file.** Rule descriptions say so — 
-`bank.order_ref (read from bank.narration)` — but a reader who opens the CSV
-looking for `order_ref` will not find it.
+## The agent
 
-## Report
+- **Agent turns aren't repeatable.** The same question on the same data can
+  take a very different number of model calls depending on the model. That's
+  why the evaluation scores the automatic pipeline, not the agent.
+- **Exploration is capped at six "looking" calls per turn.** A complicated
+  question may be answered from partial evidence.
+- **Uploaded data reaches the model.** Cell values (like bank narrations,
+  which a payer can write) appear in tool results, and file names and column
+  names appear in the agent's instructions. Instructions hidden in that text
+  could steer the agent. The code-level limits (read-only SQL, verification,
+  rule approval) still apply.
 
-**The checksum covers proposals, not source files.** It is computed over
-`(rule, group_key, confidence, status, members)` and detects a reconciliation
-changing underneath a report. It does not detect a source CSV being edited and
-re-uploaded.
+## Running it
 
-**A dataset read through two edges can be counted two ways.** The per-source
-money figure recovers its amount column by asking which cell each matched amount
-came from and taking the majority. A gateway compared on its gross against a
-ledger and on its net against a bank has two defensible answers; ties break on
-column name so the figure is stable, and the column is printed beneath it so the
-number can be checked. It is still one of two possible readings.
-
-**Period detection reads only `DATE` / `TIMESTAMP` columns.** A file whose dates
-were typed `TEXT` — one malformed row is enough — contributes no date range to
-the report header.
-
-**A file whose money never entered a match gets no figure**, rather than a total
-that cannot be tied to anything.
-
-## Agent
-
-**Only the deterministic pipeline is gated.** The agent turn is not reproducible
-— the same prompt on the same data has taken 3, 7 and 36 model calls depending
-on the model — so the evaluation harness treats its score as a sample and gates
-on `auto_match_exact` instead. A model change cannot regress the numbers, but it
-can change the cost and the wording considerably.
-
-**Model choice is a cost decision, not an accuracy one.** Measured across six
-runs on identical data, two different models produced byte-identical accuracy
-(98.42%) and FAMR (1.10%) while differing 16× in cost and 6× in latency.
-
-**Exploration is bounded at six looking calls per turn.** A genuinely
-complicated question may hit that ceiling and be answered from partial
-evidence — the refusal tells the model to answer with what it has.
-
-## Operations
-
-**Single-process, single-database, no authentication.** SQLite in WAL mode, the
-agent running inside the FastAPI process, no users, no tenancy and no
-authorisation on any route. Anyone who can reach the API can read every uploaded
-file and accept any match. It is a local analysis tool, not a deployed service.
-
-**Discovery samples at `DISTINCT_CAP = 50,000` distinct values per column.**
-Beyond that the overlap is computed on a truncated set, so a join on a very
-high-cardinality column in a very large file may be under-measured.
-
-**No background work.** Reconciliation runs inside the request. A large upload
-holds the connection for the duration.
-
-**The test modules run themselves** (`python -m tests.test_duplicates`) because
-the project has no test runner installed. They also work under pytest if one is
-added.
+- **Single process, single SQLite database, no login.** There are no users and
+  no permissions on any route. Anyone who can reach the API can read every
+  file and accept any match.
+- **Any website open in your browser can call the API.** `POST
+  /api/session/reset` (which wipes all data) and file uploads need no special
+  headers, so CORS doesn't block them. Run Ledgerline only on your own
+  machine.
+- **It's a local analysis tool, not a deployed service.**

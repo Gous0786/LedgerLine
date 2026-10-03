@@ -1,81 +1,81 @@
-# The agent surface
+# The agent and its tools
 
-One `LlmAgent` with six tools. There is no orchestrator/worker split and no
-sub-agent tree — an earlier thirteen-tool surface cost a median of 10 model
-calls and 45k tokens for a hundred rows, mostly spent re-deriving what an
-earlier call already knew.
+There is one ADK `LlmAgent` with six tools. There are no sub-agents. The agent
+is defined in [`agents/root_agent.py`](../backend/app/agents/root_agent.py)
+and the tools in [`agents/tools/recon.py`](../backend/app/agents/tools/recon.py).
 
-The rule that shapes all six: **a tool either does the whole job or answers a
-question.** `run_reconciliation` returns its rules, its coverage *and* its
-leftovers in one result, because the alternative — measured on a real turn — was
-the agent following it with `reconciliation_status`, `list_unmatched`,
-`list_proposals`, `get_proposal` and five SQL probes. Eight round trips to learn
-what one function already knew, and every round trip is paid again in the
-history of every later call.
+**Design rule: a tool either does a whole job or answers one question.** Every
+tool call adds its result to the conversation, and the whole conversation is
+re-sent with every later model call. Fewer, larger tools keep turns cheaper.
+For example, `run_reconciliation` returns its rules, its coverage *and* what was
+left unmatched in one result, so the agent doesn't need several follow-up calls
+to find out.
 
 ---
 
-## The six
+## The six tools
 
 ### `list_datasets()`
 
-Every uploaded dataset with its columns, types, row count and any published
-views. The cheap orientation call.
+Lists every uploaded file with its columns, types, row count and any extra
+views. A cheap way to get oriented.
 
 ### `describe_dataset(dataset)`
 
-Per-column statistics for one file: distinct count, nulls, min/max, top values,
-whether the column is unique, and a pattern signature. Tells an identifier from
-an amount when the names do not. Accepts a name or an id.
+Column statistics for one file: distinct count, nulls, min/max, most common
+values, whether the column is unique, and a pattern of what the values look
+like. Useful for telling an id column from an amount column. Takes a name or an
+id.
 
 ### `query_data(sql)`
 
-One read-only `SELECT` or `WITH`, returning columns and the first rows. Guarded
-by [`core/sqlguard.py`](../backend/app/core/sqlguard.py), which opens the
-database read-only and rejects anything that is not a single select.
+Runs one read-only `SELECT` or `WITH` query and returns the columns and the
+first rows (10 by default). [`core/sqlguard.py`](../backend/app/core/sqlguard.py)
+opens the database read-only and rejects anything that isn't a single select.
 
-For *looking* at data, not for matching it. Results stay in the conversation and
-are re-sent on every later call, so an aggregate beats a page of rows.
+Use it to *look* at data, not to match it.
 
 ### `run_reconciliation(config)`
 
-The one that does the work. Two modes:
+The tool that does the actual work. It has two modes:
 
 | Mode | Config | What happens |
 | --- | --- | --- |
-| `auto` | `{"mode": "auto"}` | The whole deterministic pipeline — discovery, cardinality, amounts, proposals, verification. Zero tokens spent on arithmetic. **Start here, and usually stop here.** |
-| `rule` | `{"mode": "rule", "rule": ..., "sql": ..., "description": ...}` | One hand-written rule, for a relationship the automatic pass declined. The SQL must return `group_key`, `dataset`, `row`. |
+| `auto` | `{"mode": "auto"}` | Runs the whole matching pipeline ([RULE-ENGINE.md](RULE-ENGINE.md)). **Start here; usually it's all you need.** |
+| `rule` | `{"mode": "rule", "rule": ..., "sql": ..., "description": ...}` | Runs one hand-written rule, for a link the automatic pass skipped. The SQL must return `group_key`, `dataset` and `row` (and optionally `amount_minor`). |
 
-Returns the rules it ran with their join, shape, strategy, amount relationship
-and measured agreement; the groups proposed by confidence; per-dataset coverage;
-any edges it **declined** and why; and any embedded keys it had to resolve.
+Either mode can also take `{"spine": "<dataset>"}` to set which file the flow
+of money starts from.
 
-Never budgeted (below): running out of an exploration allowance must not mean
-leaving the job half done.
+In `rule` mode, the rule name can't start with `auto_`, and reusing an existing
+rule name with different SQL is refused. New rules start unapproved, so their
+matches wait for a person.
+
+The result lists the rules that ran (with join, shape, amount columns and how
+well they agreed), the proposals by confidence, coverage per file, any links it
+**skipped** and why, and any references it found inside text columns.
 
 ### `get_exceptions(filters)`
 
-Everything needing a person, in one call. `{}` for all of it, or narrow by
-`kind` (`unbalanced` · `ambiguous` · `verification_failed` · `unmatched`),
-`dataset`, `limit`.
+Everything that needs a person, in one call. Pass `{}` for everything, or
+filter by `kind` (`unbalanced`, `ambiguous`, `verification_failed`,
+`unmatched`), `dataset` and `limit`.
 
-`groups` are matches with something wrong — amounts that do not tie, rows that
-could join two ways, a group its own verification refused. `unmatched` are rows
-in no accepted match at all.
+- `groups` are matches with a problem: amounts that don't balance, rows that
+  could belong to two groups, or a group that failed verification.
+- `unmatched` are rows that aren't in any accepted match.
 
-Both are *findings*, not failures. A bank statement holds fees and balance lines
-no order will ever explain, and the instruction is explicit that those must be
-distinguished from real breaks.
+Neither is necessarily an error. A bank statement has fees and balance lines
+that no order will ever explain.
 
 ### `get_transaction_chain(transaction_id)`
 
-Follow one identifier end to end — "what happened to ORDER-1042", "did this
-settle". Finds every row holding the value, follows the identifiers in those
-rows into the other sources, and reports the matches they belong to with their
-event history.
+Follows one id from start to finish, for questions like "what happened to
+ORDER-1042?" It finds every row holding that value, follows the ids in those
+rows into the other files, and reports the matches they belong to and their
+history.
 
-**Read only, records nothing.** Being asked about something is not permission to
-reconcile it.
+**It only reads; it never creates or changes matches.**
 
 ---
 
@@ -84,59 +84,58 @@ reconcile it.
 ```mermaid
 flowchart LR
     M["model wants<br/>a tool"] --> BT["before_tool"]
-    BT -->|"budget spent"| R["refuse, with<br/>actionable text"]
+    BT -->|"budget used up"| R["refuse, and tell it<br/>to answer with what it has"]
     BT -->|"allowed"| T["tool runs"]
     T --> AT["after_tool"]
-    AT --> C["cap result<br/>at 6k chars"]
+    AT --> C["trim result<br/>to 6,000 chars"]
     C --> M
 ```
 
-| Guard | Where | Value |
+| Guard | Where | Limit |
 | --- | --- | --- |
-| Exploration budget | `before_tool` | 6 looking calls per turn |
-| Result cap | `after_tool` | 6,000 chars, longest list trimmed first |
+| Exploration budget | `callbacks.before_tool` | 6 calls per turn to the five "looking" tools; `run_reconciliation` is never counted |
+| Result size | `callbacks.after_tool` | 6,000 characters; the longest list is trimmed first |
 | Model calls | ADK runner | 40 per turn |
-| SQL | `sqlguard` | read-only handle, single select only |
-| Rule trust | `matching.release` | a new rule stays pending until approved once; approval is pinned to its SQL, and `auto_*` names are reserved |
+| SQL | `sqlguard` | read-only connection, one select only |
+| Rule approval | `matching.propose_matches` | agent rules need a person's approval; approval is tied to the rule's SQL |
 
-`run_reconciliation` is exempt from the budget in both modes. The refusal text
-is written to be *actionable* — it tells the model to answer with what it has,
-because a refusal it cannot act on just becomes another wasted round trip.
+### Gotchas when editing callbacks
 
-> The budget was dead code for its entire life until it was measured. It held an
-> `int` in a `ContextVar`, and ADK dispatches each tool call inside
-> `asyncio.create_task` / `copy_context()` — a copied context shares object
-> *references* but not *rebindings*, so `.set()` was discarded when each task
-> ended and every call read back `spent = 1`. It now holds a mutable box that
-> every copied context shares. A chatty model made 54 `query_data` calls against
-> a budget of 6 before this was caught.
+- **Callbacks must take keyword-only arguments.** ADK calls them by keyword. A
+  callback with positional parameters is silently never called, so run tracking
+  just stops.
+- **The budget counter is a mutable object inside a `ContextVar`, not an
+  `int`.** ADK runs each tool call in a copied context. Setting a new value in
+  a copy is lost when that call ends, but changing a shared object isn't. With
+  a plain `int`, the budget never counted past 1.
 
 ---
 
-## Accounting
+## Token and cost tracking
 
-`before_model` / `after_model` open and close a run and record, per model call:
+`before_model` and `after_model` record each model call in `run_metric`:
 prompt tokens, completion tokens, cached tokens, reasoning tokens, cost and
-latency into `run_metric`. **These must be summed, not taken from the last
-call** — one turn makes many calls and each reports its own usage; reading only
-the final one hides where the spend actually is.
+time. One turn makes many model calls, so **add up all the rows for a run**;
+don't read only the last one.
 
-The callbacks are declared **keyword-only** because ADK invokes them by keyword.
-Positional parameters fail silently: the callback is never called, and every
-piece of run tracking simply does not happen.
+Prices come from LiteLLM, or from OpenRouter's price list for models LiteLLM
+doesn't know (`core/pricing.py`).
 
 ---
 
-## What the agent may not do
+## What the agent is told not to do
 
-The instruction in
-[`agents/root_agent.py`](../backend/app/agents/root_agent.py) is explicit:
+The instructions in `root_agent.py` say:
 
-- **never state a figure it computed itself** — every number comes from a tool
-  result, which came from SQL, which came from a source row;
-- **never claim something reconciled** that the pipeline did not release;
-- **report what did not reconcile** as plainly as what did.
+- **Never state a number you worked out yourself.** Every figure must come from
+  a tool result.
+- **Never say something is reconciled** unless the pipeline approved it.
+- **Report what didn't match** as clearly as what did.
 
-Session state (`agents/state.py`) is snapshotted once per turn and injected into
-the instruction, ~315 tokens, so the model starts each turn knowing what exists
-without spending a call to find out.
+These rules live only in the prompt, so they depend on the model following
+them. The hard limits are in code: the read-only SQL connection, verification
+before any `accepted` status, and rule approval.
+
+At the start of each turn, a short summary of the current state (files, views,
+likely joins, proposals so far) from `agents/state.py` is added to the instructions. That way the
+agent doesn't spend calls finding out what already exists.

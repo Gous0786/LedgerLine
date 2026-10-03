@@ -1,54 +1,57 @@
 # Architecture
 
-Ledgerline reconciles arbitrary CSV exports against each other. There is no
-canonical schema, no configured field mapping and no declared relationship
-between the files: which columns join, which direction the money flows and
-which column holds the amount are all measured from the data on upload.
+This page explains how Ledgerline is put together: the main parts, what happens
+when you send a chat message, where the code lives, and how data is stored.
 
-The organising constraint is that **the language model never does arithmetic**.
-Every figure the UI shows is produced by SQL over source rows and traces back to
-a `(dataset, row)` pointer. The agent chooses what to look at and explains what
-came back; it never supplies a number.
+The main rule to keep in mind: **the AI agent never does arithmetic.** Every
+number comes from SQL run over the uploaded rows. The agent decides what to run
+and explains the results.
 
 ---
 
-## System
+## The main parts
 
 ```mermaid
 flowchart LR
     subgraph Browser
-        UI["React 19 + Vite<br/>useChat / AI SDK"]
+        UI["React app<br/>(useChat from AI SDK)"]
     end
 
-    subgraph API["FastAPI process (single)"]
+    subgraph API["One FastAPI process"]
         direction TB
         HTTP["REST routes<br/>/api/*"]
-        CHAT["/api/chat<br/>SSE"]
-        AGENT["ADK LlmAgent<br/>6 tools"]
-        CORE["Reconciliation core<br/>deterministic, no LLM"]
+        CHAT["/api/chat<br/>(streaming)"]
+        AGENT["ADK agent<br/>6 tools"]
+        CORE["Matching pipeline<br/>(no AI)"]
     end
 
-    DB[("SQLite (WAL)<br/>ds_* tables + views")]
-    OR["OpenRouter<br/>via LiteLLM"]
+    DB[("SQLite<br/>one table per CSV")]
+    OR["OpenRouter<br/>(via LiteLLM)"]
 
     UI -- "JSON" --> HTTP
-    UI -- "UI Message Stream" --> CHAT
+    UI -- "stream" --> CHAT
     CHAT --> AGENT
     AGENT -- "tool calls" --> CORE
-    AGENT -- "completions" --> OR
+    AGENT -- "model calls" --> OR
     HTTP --> CORE
     CORE --> DB
     AGENT -.->|"run log,<br/>tokens, cost"| DB
 ```
 
-**The agent runs inside the FastAPI process**, not behind a separate
-`adk api_server`. One event bus, one SQLite handle, and no cross-process
-plumbing between the agent and the stream the browser is reading. The cost is
-that the API cannot be scaled horizontally without moving the store first.
+- **Frontend:** a React app with three screens (upload, workspace, report).
+- **REST routes** (`backend/app/api/`) cover uploads, proposals, coverage, the
+  report and similar. The UI calls these directly for anything that isn't chat.
+- **The agent** runs **inside** the FastAPI process, not as a separate service.
+  That keeps one process and one database connection, with no messaging between
+  services. The catch is that you can't run several copies of the API until the
+  database moves off SQLite.
+- **The matching pipeline** (`backend/app/core/`) does all the real work. The
+  REST routes and the agent's tools both call into it. See
+  [RULE-ENGINE.md](RULE-ENGINE.md).
 
 ---
 
-## A turn, end to end
+## What happens in one chat turn
 
 ```mermaid
 sequenceDiagram
@@ -56,66 +59,73 @@ sequenceDiagram
     participant UI
     participant Chat as /api/chat
     participant Agent as ADK agent
-    participant Tools as recon tools
-    participant Core as core pipeline
+    participant Tools as agent tools
+    participant Core as pipeline
     participant DB as SQLite
 
     UI->>Chat: POST message
-    Chat->>Agent: runner.run(session, text)
-    Note over Agent: before_model — run log opens
+    Chat->>Agent: run the turn
+    Note over Agent: before_model: start the run log
     Agent->>Tools: run_reconciliation({mode:"auto"})
-    Note over Tools: before_tool — exploration budget
+    Note over Tools: before_tool: check the exploration budget
     Tools->>Core: auto_match_exact()
-    Core->>DB: discovery, classification, proposals
+    Core->>DB: find joins, build proposals
     Core->>DB: verify every proposal
     Core-->>Tools: rules, coverage, exceptions
-    Note over Tools: after_tool — result capped at 6k chars
-    Tools-->>Agent: JSON
-    Agent-->>Chat: reasoning / text / tool parts
-    Chat-->>UI: SSE chunks (AI SDK v1)
-    Note over Agent: after_model — tokens, cost, latency
+    Note over Tools: after_tool: trim result to 6,000 chars
+    Tools-->>Agent: JSON result
+    Agent-->>Chat: text, reasoning, tool calls
+    Chat-->>UI: streamed chunks
+    Note over Agent: after_model: record tokens, cost, time
 ```
 
-Chunks are translated from ADK events in
-[`streaming/translator.py`](../backend/app/streaming/translator.py) and built by
-[`streaming/protocol.py`](../backend/app/streaming/protocol.py), whose typed
-mirror is `frontend/src/types/stream.ts`. **Change one, change the other.**
+### The stream format
 
-Agent prose, reasoning and tool calls use the SDK's native chunk types so
-`useChat` renders them with no custom code. Agent status and the token/cost
-meter travel as custom `data-*` parts, where two behaviours are load-bearing:
+The chat response uses the Vercel AI SDK's "UI Message Stream" format, sent as
+server-sent events. Three files define it:
 
-- a data part with a **stable `id`** updates in place instead of appending — one
-  live status row rather than a growing list;
-- a part marked **`transient`** reaches `onData` but never enters message
-  history — correct for high-frequency meter ticks.
+- [`streaming/translator.py`](../backend/app/streaming/translator.py) turns
+  ADK events into stream chunks.
+- [`streaming/protocol.py`](../backend/app/streaming/protocol.py) builds the
+  chunks.
+- `frontend/src/types/stream.ts` is the TypeScript copy of `protocol.py`.
+  **If you change one, change the other.**
+
+Text, reasoning and tool calls use the SDK's built-in chunk types, so `useChat`
+shows them without custom code. The agent's status and the token/cost meter use
+custom `data-*` parts. Two behaviours matter:
+
+- A data part with a **fixed `id`** replaces the earlier part with that id, so
+  the status shows as one updating line, not a growing list.
+- A part marked **`transient`** reaches the `onData` callback but isn't saved
+  in the message history. That suits the meter, which updates often.
 
 ---
 
-## Modules
+## Where the code lives
 
-| Path | Responsibility |
+| Path | What it does |
 | --- | --- |
-| `core/ingest.py` | Sniff, type and load a CSV into its own `ds_<id>` table |
-| `core/duplicates.py` | Mark repeated rows at ingest; per-dataset exclusion policy |
-| `core/discovery.py` | Value-overlap matrix across every column pair; `trace_record` |
-| `core/embedded.py` | Keys buried inside free text (a narration carrying an order ref) |
-| `core/automatch.py` | Cardinality classification, amount discovery, rule construction |
-| `core/matching.py` | Turn matching SQL into proposals; confidence; the release gate |
-| `core/verify.py` | Independent second pass; twelve invariants; the only door to `accepted` |
-| `core/timing.py` | Settlement lag learned from the rule's own groups |
-| `core/spine.py` | Which dataset transactions start from, inferred from matched pairs |
-| `core/transactions.py` | Group proposals into end-to-end chains along the spine |
-| `core/report.py` | The close report: value, flow, exceptions, accountability, limits |
-| `core/sqlguard.py` | Read-only SQL execution for agent queries |
-| `agents/root_agent.py` | The single `LlmAgent` and its instruction |
+| `core/ingest.py` | Reads a CSV, guesses column types, loads it into its own table |
+| `core/duplicates.py` | Marks repeated rows; per-file setting to exclude them |
+| `core/discovery.py` | Finds columns whose values overlap across files |
+| `core/embedded.py` | Finds references hidden inside text columns |
+| `core/automatch.py` | Decides join shape and amount column, writes the matching SQL |
+| `core/matching.py` | Turns SQL results into proposals, scores them, approves them |
+| `core/verify.py` | The independent second check before anything is accepted |
+| `core/timing.py` | Learns the normal settlement delay for each rule |
+| `core/spine.py` | Decides which file the flow of money starts from |
+| `core/transactions.py` | Groups matches into end-to-end chains |
+| `core/report.py` | Builds the close report |
+| `core/sqlguard.py` | Runs the agent's SQL on a read-only connection |
+| `agents/root_agent.py` | The agent and its instructions |
 | `agents/tools/recon.py` | The six tools ([TOOLS.md](TOOLS.md)) |
-| `agents/callbacks.py` | Exploration budget, result capping, run/token accounting |
-| `eval/` | Scoring against labelled fixtures; the CI gate |
+| `agents/callbacks.py` | Exploration budget, result trimming, token and cost tracking |
+| `eval/` | Scores the pipeline against labelled test data |
 
 ---
 
-## Data model
+## How data is stored
 
 ```mermaid
 erDiagram
@@ -124,50 +134,54 @@ erDiagram
     dataset ||--|| ds_table : "one table per file"
     match_proposal ||--|{ match_member : "rows in the group"
     match_proposal ||--o{ verification : "checked by"
-    match_proposal ||--o{ match_event : "audit trail"
+    match_proposal ||--o{ match_event : "history"
     run ||--o{ run_event : records
-    run ||--o{ run_metric : "tokens, cost, latency"
-    rule_trust ||--o{ match_proposal : gates
+    run ||--o{ run_metric : "tokens, cost, time"
+    rule_trust ||--o{ match_proposal : approves
 ```
 
-Each uploaded file becomes its own table, `ds_<id>`, with a synthetic `__row`
-primary key plus two mark columns (`__duplicate_of`, `__duplicate_kind`).
-Derived columns are published as **views** rather than written back, so a rule
-written later inherits them:
-
-- `v_*_norm` — a split credit/debit pair republished as one signed column
-- `v_*_key` — a reference extracted from inside a text column
-
-A proposal is a group of members; a member is a `(dataset_id, row)` pointer with
-a signed `amount_minor`. Money is integer minor units throughout. Nothing is
-ever deleted: duplicates are marked, rejected proposals are kept, and
-`match_event` records every status change.
+- **Each uploaded file becomes its own table**, named `ds_<id>`. Every table
+  gets a `__row` primary key plus two columns for duplicate marks:
+  `__duplicate_of` and `__duplicate_kind`.
+- **Derived columns are added as views**, never written back into the table:
+  - `v_<name>_norm` combines separate credit and debit columns into one signed
+    amount.
+  - `v_<name>_key` holds a reference pulled out of a text column.
+- **A proposal** (`match_proposal`) is a suggested match. Its members
+  (`match_member`) each point to one row as `(dataset_id, row)` and carry a
+  signed amount.
+- **Money is stored as whole numbers in minor units** (paise, cents), never as
+  floats.
+- **Nothing is deleted.** Duplicates are marked, rejected proposals are kept,
+  and every status change is logged in `match_event`.
+- **Rule approval** lives in `rule_trust`, stored against a hash of the rule's
+  SQL.
+- **Migrations** are plain SQL files in `db/migrations/`, applied in order at
+  startup. To change the schema, add a new numbered file; never edit an old
+  one.
 
 ---
 
 ## Frontend
 
-Three columns, one job each — the reconciled rail on the left, the conversation
-in the middle, source files on the right — plus a home page, an upload page and
-a `/report` route. Routing is a fifty-line History wrapper (`app/router.tsx`)
-rather than a dependency; three screens do not justify one.
-
-Providers wrap the router, not the reverse: a question typed on the upload
-screen is answered on the workspace, and a chat provider mounted per-route would
-drop the stream mid-turn.
+- **Workspace layout:** three columns. Matched results on the left, chat in
+  the middle, source files on the right.
+- **Other pages:** a home page, an upload page and `/report`.
+- **Routing:** a small wrapper around the browser History API
+  (`app/router.tsx`), not a routing library.
+- **Providers sit above the router.** The datasets, proposals and chat
+  providers wrap the router, not the other way round. A question typed on the
+  upload screen keeps streaming after you move to the workspace. If the chat
+  provider were mounted per page, the stream would be cut off on navigation.
 
 ---
 
-## Where the numbers come from
+## Where each number comes from
 
-| Surface | Source |
+| On screen | Computed by |
 | --- | --- |
-| Coverage, edges | `matching.reconciliation_status()` |
+| Coverage and links between files | `matching.reconciliation_status()` |
 | Transaction chains | `transactions.build(spine)` |
-| Report totals | source cells, via the column recovered by `verify.trace_amount` |
-| Token / cost meter | `run_metric`, summed per run — one row per model call |
-| Confidence | recomputed by the verifier, never taken from the proposal |
-
-See [RULE-ENGINE.md](RULE-ENGINE.md) for how a match is decided,
-[TOOLS.md](TOOLS.md) for the agent surface, and
-[LIMITATIONS.md](LIMITATIONS.md) for what this does not do.
+| Report totals | the original cells, located by `verify.trace_amount` |
+| Token and cost meter | `run_metric`, one row per model call, summed per run |
+| Confidence | recomputed by the verifier, never copied from the proposal |

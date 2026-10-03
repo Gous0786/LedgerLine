@@ -1,13 +1,13 @@
 # Ledgerline
 
-Multi-source payment reconciliation over arbitrary CSVs. No canonical schema, no
-configured field mapping, no declared relationship between the files: which
-columns join, which direction the money flows, and which column holds the amount
-are all measured from the data on upload.
+Ledgerline checks whether payment records from different systems agree with
+each other. Upload CSV exports, for example an ERP ledger, a payment gateway
+export and a bank statement, and ask it to reconcile. It tells you what matched,
+what didn't, and why. Every figure points back to a row in one of your files.
 
-Point it at a ledger, a gateway export and a bank statement, ask it to reconcile,
-and get back what tied, what did not, and why — with every figure traceable to a
-source row.
+You don't have to describe your files first. Ledgerline works out from the data
+which columns link the files, which column holds the amount, and which file
+comes first in the flow of money.
 
 ```text
 ┌──────────────┐      ┌───────────────────┐      ┌────────────────┐
@@ -19,92 +19,64 @@ source row.
    ORD-1006  never reached the gateway              unmatched
 ```
 
-## Documentation
+## Core ideas
 
-| | |
-| --- | --- |
-| [Architecture](docs/ARCHITECTURE.md) | System diagram, request lifecycle, module map, data model |
-| [Rule engine](docs/RULE-ENGINE.md) | How a match is decided, stage by stage, and why each threshold is measured |
-| [Agent surface](docs/TOOLS.md) | The six tools, the guardrails, what the agent may not do |
-| [Limitations](docs/LIMITATIONS.md) | What this does not check, and where it will mislead you |
+1. **The AI never does the maths.** All matching and adding up happens in SQL.
+   The AI agent decides what to run and explains the results. It never
+   produces a number itself.
+2. **Settings are measured from the data, not hard-coded.** Join columns,
+   amount columns and the normal settlement delay are all worked out from the
+   files you upload.
+3. **Nothing is auto-approved without a second check.** Before any match is
+   marked `accepted`, a separate verifier re-reads the original rows and redoes
+   the sums.
+4. **Unmatched rows are normal.** A bank statement has fees and balance lines
+   that no order will explain. They are reported plainly, not treated as errors.
+
+## Quick start
+
+You need Python 3.12 with [`uv`](https://docs.astral.sh/uv/), Node.js, and an
+[OpenRouter](https://openrouter.ai) API key.
+
+```bash
+# backend (http://127.0.0.1:8000)
+cd backend
+uv sync
+cp .env.example .env          # then add your OPENROUTER_API_KEY
+uv run uvicorn app.main:app --reload
+
+# frontend (http://localhost:5173, sends /api calls to the backend)
+cd frontend
+npm install
+npm run dev
+```
+
+On Windows, `./dev.ps1` starts both.
+
+Then upload CSVs on `/upload` and ask the agent to reconcile. `/report` shows
+the close report, which you can download as a single HTML file.
+
+For demo data, run `uv run python ../demo/load.py` from `backend/`. It wipes the
+database and loads the three files in `demo/data/`.
 
 ## Stack
 
 | Layer | Choice |
 | --- | --- |
-| Backend | FastAPI + uvicorn (Python 3.12, `uv`) |
-| Store | SQLite (WAL); each CSV lands in its own table |
-| Agent | Google ADK `LlmAgent`, models via LiteLLM → OpenRouter |
-| Transport | Vercel AI SDK **UI Message Stream** over SSE |
-| Frontend | Vite 8 + React 19 + TypeScript, Tailwind 4, `@ai-sdk/react` |
+| Backend | FastAPI + uvicorn, Python 3.12, managed with `uv` |
+| Database | SQLite (WAL mode). Each uploaded CSV becomes its own table |
+| Agent | Google ADK `LlmAgent`; models through LiteLLM → OpenRouter |
+| Streaming | Vercel AI SDK "UI Message Stream" over server-sent events |
+| Frontend | Vite 8, React 19, TypeScript, Tailwind 4, `@ai-sdk/react` |
 
-## The four decisions that shape everything
+## Documentation
 
-**The LLM never does arithmetic.** Matching, summing and balancing run as SQL.
-The agent chooses strategies and interprets results; every figure the UI shows
-traces to a database row, not a token.
-
-**Nothing is configured that can be measured.** A shared key is classified by
-cardinality before anything is proposed. Amount columns are found by how often
-they agree across a join, never by name. The normal settlement lag is learned
-from each rule's own groups. A constant right for one processor's contract is
-wrong for the next dataset — so there are none.
-
-**Nothing is accepted on its own say-so.** Confidence is computed from the
-numbers the matching SQL returned, so it cannot notice those numbers being
-wrong. Every route to `accepted` passes through an independent verifier that
-trusts only `(dataset, row)` pointers and re-derives each figure from the source
-cell in exact decimal.
-
-**Findings are not failures.** A bank statement holds fees and balance lines no
-order will ever explain. What did not reconcile is reported as plainly as what
-did, and the close report states what it did not check.
-
-## Setup
-
-```bash
-# backend
-cd backend
-uv sync
-cp .env.example .env          # add OPENROUTER_API_KEY
-uv run uvicorn app.main:app --reload
-
-# frontend
-cd frontend
-npm install
-npm run dev                   # http://localhost:5173, proxies /api → :8000
-```
-
-Upload CSVs on `/upload`, then ask the agent to reconcile. `/report` renders the
-close report and downloads as a self-contained HTML file.
-
-## Evaluation
-
-The deterministic pipeline is scored against labelled fixtures, so a change to
-matching is measured rather than eyeballed:
-
-```bash
-cd backend
-uv run python -m app.eval --fixture <dir>
-uv run python -m app.eval --fixture <dir> --json > eval.json
-uv run python -m app.eval --fixture <dir> --max-false-auto-match 0.03 --min-recall 0.95
-uv run python -m app.eval --fixture <dir> --agent      # drives a real turn; costs money
-```
-
-No LLM is involved by default — it runs ingest, `auto_match_exact`, the release
-gate and the verifier in a throwaway database, then compares against the
-fixture's `expected_reconciliation.csv`. A fixture whose CSVs no longer match its
-labels is rejected rather than scored.
-
-Ground truth distinguishes fifteen outcomes; this system can claim three
-(`MATCHED`, `EXCEPTION`, `MISSING`), so outcomes collapse to those and the report
-names which were not recovered. The headline number is the **false auto-match
-rate** — of the groups released without a human, how many were not real matches.
-Missing a match costs an afternoon; inventing one puts a wrong figure in front of
-someone who signs it off.
-
-Current: **97.0–100% accuracy, 0–2.9% false auto-match** across eleven fixtures
-spanning clean, mixed-exception, month-end and failed-reconciliation scenarios.
+| Doc | Read it for |
+| --- | --- |
+| [Architecture](docs/ARCHITECTURE.md) | How the pieces fit, what happens in a chat turn, the data model |
+| [Rule engine](docs/RULE-ENGINE.md) | How a match is found, checked and approved, step by step |
+| [Agent and tools](docs/TOOLS.md) | The six tools the agent can call, and its limits |
+| [Limitations](docs/LIMITATIONS.md) | What Ledgerline doesn't check, and known bugs |
 
 ## Tests
 
@@ -116,40 +88,63 @@ uv run python -m tests.test_translator_reasoning
 uv run python -m tests.test_release_gate
 ```
 
-They run themselves because the project has no test runner installed, and work
-under pytest if one is added. Each guard in the duplicate and embedded-key
-detectors has a test that fails when the guard is disabled.
+No test runner is installed, so each file runs itself. They also work under
+pytest if you add it. Lint with `uv run ruff check app tests`, and type-check
+the frontend with `npm run typecheck`.
 
-## Layout
+## Evaluation
+
+The matching pipeline can be scored against labelled test data ("fixtures"):
+
+```bash
+cd backend
+uv run python -m app.eval --fixture <dir>
+uv run python -m app.eval --fixture <dir> --json > eval.json
+uv run python -m app.eval --fixture <dir> --max-false-auto-match 0.03 --min-recall 0.95
+uv run python -m app.eval --fixture <dir> --agent    # runs a real agent turn; costs money
+```
+
+A fixture is a folder of CSVs plus an `expected_reconciliation.csv` that says
+what the right answer is. Without `--agent`, no AI model is used. The harness
+loads the files into a temporary database, runs the automatic matching, and
+compares the result with the expected answer.
+
+The most important number is the **false auto-match rate**: of the matches
+approved without a person, how many were wrong. A missed match costs someone an
+afternoon. A wrong match puts a false figure in front of the person who signs
+off on the books.
+
+> The fixtures are not in this repository, so you need your own to run the
+> evaluation. The last recorded result was 97–100% accuracy with a 0–2.9% false
+> auto-match rate across eleven fixtures.
+
+## Project layout
 
 ```text
 backend/app/
-  config.py            settings (model, db path, CORS, timeouts)
+  main.py, config.py   app setup and settings (.env)
+  api/                 REST routes and the /api/chat stream
+  core/                the matching pipeline (no AI here)
+    ingest.py            CSV → its own ds_<id> table
+    duplicates.py        mark repeated rows
+    discovery.py         find columns whose values overlap across files
+    embedded.py          find references hidden inside text, e.g. a narration
+    automatch.py         decide join shape and amount column, build matching SQL
+    matching.py          turn SQL results into proposals; the approval gate
+    verify.py            the independent second check
+    timing.py            learn the normal settlement delay
+    spine.py             decide which file the money flow starts from
+    transactions.py      group matches into end-to-end chains
+    report.py            the close report
+    sqlguard.py          run the agent's SQL read-only
+  agents/              the AI agent, its six tools, and its callbacks
+  streaming/           turn agent events into the stream the browser reads
   db/                  connection, migration runner, migrations/
-  api/                 health · chat · datasets · proposals · coverage ·
-                       transactions · runs · metrics · report · session
-  core/
-    ingest.py          CSV → its own ds_<id> table
-    duplicates.py      mark repeated rows at ingest; per-file policy
-    discovery.py       value-overlap matrix; trace_record
-    embedded.py        keys buried inside free text
-    automatch.py       cardinality, amount discovery, rule construction
-    matching.py        proposals, confidence, the release gate
-    verify.py          twelve invariants; the only door to accepted
-    timing.py          settlement lag learned from the data
-    spine.py           which dataset transactions start from
-    transactions.py    end-to-end chains along the spine
-    report.py          the close report
-    sqlguard.py        read-only SQL for agent queries
-  agents/
-    root_agent.py      the single LlmAgent and its instruction
-    tools/recon.py     the six tools
-    callbacks.py       exploration budget, result capping, run accounting
-  streaming/           AI SDK chunk builders, SSE wrapper, ADK → chunk translator
-  eval/                fixtures, runner, scoring, the CI gate
+  eval/                the evaluation harness
 frontend/src/
   routes/              Home · Upload · Workspace · Report
-  components/workspace ChatPanel · ReconciledRail · SourceRail · Chain · TokenMeter
-  state/               datasets · proposals · chat providers
-  types/stream.ts      typed mirror of streaming/protocol.py
+  components/          chat panel, matched/source side panels, chain view
+  state/               React context for datasets, proposals and chat
+  types/stream.ts      TypeScript copy of streaming/protocol.py
+demo/                  demo data and a script for a live walkthrough
 ```
